@@ -85,7 +85,12 @@ cjp starts a small HTTP proxy on `127.0.0.1` and sends claude through it. The pr
 
 Everything else gets `403`, for example `api.anthropic.com`, `claude.ai`, Bedrock in other regions, and any web page. Blocked hosts are written to `%LOCALAPPDATA%\cjp\proxy.log` (Linux: `~/.cache/cjp/proxy.log`).
 
-If you have a corporate proxy, the cjp proxy goes through it. It takes the address from `CJP_PROXY_UPSTREAM`, then `HTTPS_PROXY`, then `env.HTTPS_PROXY` in `~/.claude/settings.json`, then the Windows proxy setting. Only `http://` proxies with no login or a basic login work. For NTLM or Kerberos, put a local helper proxy (Px, cntlm) in between.
+If you have a corporate proxy, the cjp proxy goes through it. It takes the address from `CJP_PROXY_UPSTREAM`, then `HTTPS_PROXY`, then `env.HTTPS_PROXY` in `~/.claude/settings.json`, then the Windows proxy setting. Only `http://` proxies with no login or a basic login work.
+
+- NTLM or Kerberos login: put a local helper proxy (Px, cntlm) in between, and set its address in `CJP_PROXY_UPSTREAM`.
+- A setup script (PAC or WPAD, "Use setup script" in Windows) can not be read. Set the proxy address in `CJP_PROXY_UPSTREAM`.
+- SOCKS proxies do not work.
+- Do not put a proxy password in `.env`, because it goes into the exe as plain text. Give it at run time: `HTTPS_PROXY=http://user:pass@host:port`.
 
 Limits. The proxy stops traffic by accident. It is not a firewall:
 

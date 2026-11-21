@@ -105,7 +105,7 @@ For production, build on Windows with your `.env`.
    - Budgets data lags 8 to 12 hours. For a hard $100 cap, stop at $80.
    - IAM Identity Center roles (`AWSReservedSSO_*`) can not take the policy directly. Use an SCP or a normal IAM role.
 5. **Test on Windows**: first run with network, behind the corporate proxy. Check that uv, rtk, and graphify install, and that `rtk init -g` adds the hook.
-   Then check the proxy: `cjp -p hi` must answer, and `%LOCALAPPDATA%\cjp\proxy.log` must show nothing for AWS hosts. A `FAIL` line means the corporate proxy refused cjp (NTLM or Kerberos login: put Px or cntlm in between).
+   Then check the proxy: `cjp -p hi` must answer, and `%LOCALAPPDATA%\cjp\proxy.log` must show nothing for AWS hosts. A `FAIL` line means the corporate proxy refused cjp (NTLM or Kerberos login: put Px or cntlm in between). If Windows uses a setup script (PAC) for the proxy, cjp can not read it: set `CJP_PROXY_UPSTREAM`.
 6. **Decide the host list.** `proxy.allow_hosts` in `policy.yaml` has GitHub, PyPI, npm, Maven Central, and Gradle. Remove the groups that are not needed. Add internal hosts with `CJP_PROXY_ADD_HOSTS` in `.env`. If the IAM Identity Center is not in Tokyo or Osaka, add `oidc.<region>.amazonaws.com` and `portal.sso.<region>.amazonaws.com`.
 7. **Make the limit hard.** The cjp proxy only covers programs that use the proxy env vars. Java, Maven, and Gradle do not use them by default. Allow the same host list in the corporate proxy or firewall.
 
