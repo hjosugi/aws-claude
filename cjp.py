@@ -380,6 +380,17 @@ def mask_url(url):
     return re.sub(r"//[^@/]*@", "//***@", url)
 
 
+def is_jp_bedrock_url(url):
+    # https, and an AWS host in a Japan region: the normal endpoint or a VPC endpoint.
+    try:
+        u = urllib.parse.urlsplit(url)
+        host = (u.hostname or "").lower()
+    except ValueError:
+        return False
+    return u.scheme == "https" and any(
+        host.endswith((f".{region}.amazonaws.com", f".{region}.vpce.amazonaws.com")) for region in JP_REGIONS)
+
+
 def validate_policy(raw):
     # Check the YAML and return a clean dict. Raise PolicyError on any problem.
     if not isinstance(raw, dict):
@@ -523,8 +534,8 @@ def env_violation(key, value, p):
         return "not allowed (Bedrock only)"
     if key in MODEL_ENV and value not in p["models"].values():
         return f"model {value!r} is not in the policy"
-    if key == "ANTHROPIC_BEDROCK_BASE_URL" and not any(f".{r}." in value for r in JP_REGIONS):
-        return "endpoint is not in a Japan region"
+    if key == "ANTHROPIC_BEDROCK_BASE_URL" and not is_jp_bedrock_url(value):
+        return "endpoint is not an AWS host in a Japan region"
     if key == "CLAUDE_CODE_USE_BEDROCK" and value != "1":
         return "Bedrock must be on"
     profile = p["aws"]["profile"]

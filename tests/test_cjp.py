@@ -7,6 +7,7 @@ import http.server
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -26,6 +27,9 @@ MODELS = {"haiku": "jp.anthropic.claude-haiku-5-5"}
 PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "ALL_PROXY")
 # Set CJP_TEST_EXE to a built cjp binary to test it too (see test_built_exe).
 EXE = str(Path(os.environ["CJP_TEST_EXE"]).resolve()) if os.environ.get("CJP_TEST_EXE") else ""
+# Set CJP_TEST_FIRST_RUN=1 to test a first start: it installs uv, rtk, and graphify
+# from the network into a temp home. The workflow does this on Windows and Linux.
+FIRST_RUN = os.environ.get("CJP_TEST_FIRST_RUN") == "1"
 
 
 def policy(**extra):
@@ -189,6 +193,21 @@ class PolicyTest(TempDirTest):
         self.assertEqual(sorted(no_profile), ["AWS_ACCESS_KEY_ID", "AWS_BEARER_TOKEN_BEDROCK", "AWS_PROFILE", "KEEP"])
         same = {"AWS_PROFILE": "work"}
         self.assertEqual(cjp.clean_env(same, policy(aws={"profile": "work"})), {})
+
+    def test_bedrock_endpoint_must_be_aws_in_japan(self):
+        good = ("https://bedrock-runtime.ap-northeast-1.amazonaws.com",
+                "https://bedrock-runtime.ap-northeast-3.amazonaws.com/",
+                "https://vpce-0abc-xyz.bedrock-runtime.ap-northeast-1.vpce.amazonaws.com")
+        bad = ("https://bedrock-runtime.us-east-1.amazonaws.com",
+               "https://x.ap-northeast-1.evil.example",             # the region is only part of the name
+               "https://evil.example/.ap-northeast-1.amazonaws.com",  # the region is only in the path
+               "https://bedrock-runtime.ap-northeast-1.amazonaws.com.evil.example",
+               "http://bedrock-runtime.ap-northeast-1.amazonaws.com",
+               "https://gateway.example.co.jp")
+        for url in good:
+            self.assertIsNone(cjp.env_violation("ANTHROPIC_BEDROCK_BASE_URL", url, policy()), url)
+        for url in bad:
+            self.assertIsNotNone(cjp.env_violation("ANTHROPIC_BEDROCK_BASE_URL", url, policy()), url)
 
     def test_user_settings(self):
         path = self.dir / "settings.json"
@@ -475,7 +494,7 @@ class EndToEndTest(TempDirTest):
         self.home.mkdir()
         self.out = self.dir / "out.json"
 
-    def run_cjp(self, env_text, extra_env=None, exe=""):
+    def run_cjp(self, env_text, extra_env=None, exe="", cwd=None, timeout=120):
         (self.dir / ".env").write_text(env_text, encoding="utf-8")
         env = dict(clean_environ(), **{
             "HOME": str(self.home), "USERPROFILE": str(self.home), "LOCALAPPDATA": str(self.home / "local"),
@@ -484,10 +503,11 @@ class EndToEndTest(TempDirTest):
             "AWS_SHARED_CREDENTIALS_FILE": str(self.home / ".aws" / "credentials"),
             "CJP_ENV_FILE": str(self.dir / ".env"), "CJP_SKIP_SETUP": "1", "CLAUDE_REAL_BIN": str(self.claude),
             "FAKE_OUT": str(self.out), "FAKE_TARGET": f"127.0.0.1:{self.target.server_address[1]}",
-        }, **(extra_env or {}))
+        })
+        env.update(extra_env or {})
         cmd = [exe] if exe else [sys.executable, str(ROOT / "cjp.py")]
-        done = subprocess.run(cmd + ["-p", "hi"], env=env, cwd=self.home,
-                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        done = subprocess.run(cmd + ["-p", "hi"], env=env, cwd=cwd or self.home, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
         return done, json.loads(self.out.read_text(encoding="utf-8")) if self.out.exists() else None
 
     def test_proxy_and_role(self):
@@ -541,6 +561,49 @@ class EndToEndTest(TempDirTest):
                 break
             time.sleep(0.1)
         self.assertFalse(flag.exists())
+
+    @unittest.skipUnless(FIRST_RUN, "set CJP_TEST_FIRST_RUN=1 (installs tools from the network)")
+    def test_first_run_installs_the_tools(self):
+        repo = self.dir / "repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / "src" / "Hello.java").write_text(
+            "public class Hello {\n    void run() { helper(); }\n    void helper() {}\n}\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        # Hide tools that are already on this PC, so cjp must install them.
+        tools = [name + ext for name in ("uv", "rtk", "graphify") for ext in ("", ".exe")]
+        keep = [d for d in os.environ["PATH"].split(os.pathsep)
+                if d and (shutil.which("git", path=d) or not any((Path(d) / t).exists() for t in tools))]
+        done, out = self.run_cjp("", {"CJP_SKIP_SETUP": "", "PATH": os.pathsep.join(keep)},
+                                 exe=EXE, cwd=repo, timeout=1500)
+        print(done.stderr, file=sys.stderr)  # The notes of cjp: what it installed, and what failed.
+        self.assertEqual(done.returncode, 7, done.stderr)
+        self.assertEqual(out["env"]["GRAPHIFY_HOOK_STRICT"], "1")
+        bin_dir = str(self.home / ".local" / "bin")
+        problems = [p.name for p in self.home.rglob("*.failed")]
+        for tool in ("uv", "rtk", "graphify"):
+            if not (shutil.which(tool, path=bin_dir) or shutil.which(tool, path=os.pathsep.join(keep))):
+                problems.append(f"{tool} is not installed")
+        settings = json.loads((self.home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        if "rtk" not in json.dumps(settings.get("hooks", {})):
+            problems.append("no rtk hook in settings.json")
+        if not (self.home / ".claude" / "skills" / "graphify").exists():
+            problems.append("no graphify skill")
+        claude_md = cjp.read_text(repo / "CLAUDE.md")
+        if cjp.CLAUDE_MD_MARKER not in claude_md:
+            problems.append("no data file rules in CLAUDE.md")
+        if "graphify" not in claude_md.lower():
+            problems.append("no graphify rules in CLAUDE.md")
+        if "graphify-out/" not in cjp.read_text(repo / ".git" / "info" / "exclude"):
+            problems.append("graphify-out/ is not in .git/info/exclude")
+        graph = repo / "graphify-out" / "graph.json"
+        for _ in range(180):  # The graph is built in the background.
+            if graph.exists():
+                break
+            time.sleep(1)
+        else:
+            logs = "".join(p.read_text(encoding="utf-8", errors="replace") for p in self.home.rglob("graph-*.log"))
+            problems.append(f"no code graph after 180 s. Log:\n{logs[-2000:]}")
+        self.assertEqual(problems, [], done.stderr)
 
     def test_proxy_off(self):
         done, out = self.run_cjp("CJP_PROXY=false\n", {"AWS_ACCESS_KEY_ID": "AKIAEXAMPLE"})

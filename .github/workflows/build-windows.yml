@@ -21,6 +21,24 @@ jobs:
       - name: Test
         run: uv run python -m unittest discover -s tests -v
 
+  # A first start on a clean PC: cjp installs uv, rtk, and graphify from the network,
+  # adds the rtk hook and the graphify skill, and builds the code graph.
+  # This job does not block the build, because it depends on other projects' servers.
+  first-run:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: First run with real installs
+        run: uv run python -m unittest discover -s tests -k test_first_run -v
+        env:
+          CJP_TEST_FIRST_RUN: "1"
+
   build:
     needs: test
     runs-on: windows-latest
