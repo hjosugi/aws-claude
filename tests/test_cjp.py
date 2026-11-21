@@ -7,6 +7,7 @@ import http.server
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -226,6 +227,114 @@ class PolicyTest(TempDirTest):
         self.assertIn(":123456789012:", json.dumps(cjp.iam_policy(p, "")))
         with self.assertRaises(cjp.PolicyError):
             cjp.iam_policy(policy(), "")
+
+
+class CfnLoader(cjp.yaml.SafeLoader):
+    # Reads CloudFormation short tags: !Ref X -> {"Ref": X}, !Sub ... -> {"Fn::Sub": ...}.
+    pass
+
+
+def _cfn_tag(loader, suffix, node):
+    if isinstance(node, cjp.yaml.ScalarNode):
+        value = loader.construct_scalar(node)
+    elif isinstance(node, cjp.yaml.SequenceNode):
+        value = loader.construct_sequence(node, deep=True)
+    else:
+        value = loader.construct_mapping(node, deep=True)
+    if suffix == "Ref":
+        return {"Ref": value}
+    if suffix == "GetAtt" and isinstance(value, str):
+        value = value.split(".", 1)
+    return {"Fn::" + suffix: value}
+
+
+CfnLoader.add_multi_constructor("!", _cfn_tag)
+NO_VALUE = object()
+
+
+class Template:
+    # cloudformation/cjp.yml with parameter values, resolved like CloudFormation does.
+    PATH = ROOT / "cloudformation" / "cjp.yml"
+
+    def __init__(self, **params):
+        self.doc = cjp.yaml.load(self.PATH.read_text(encoding="utf-8"), Loader=CfnLoader)
+        values = {name: spec.get("Default") for name, spec in self.doc["Parameters"].items()}
+        values.update(params)
+        for name, spec in self.doc["Parameters"].items():
+            if spec["Type"] == "CommaDelimitedList" and isinstance(values[name], str):
+                values[name] = values[name].split(",")
+        self.values = dict(values, **{"AWS::AccountId": "123456789012", "AWS::Partition": "aws",
+                                      "AWS::StackName": "cjp", "AWS::NoValue": NO_VALUE})
+        self.conditions = {}
+        for name, expr in self.doc["Conditions"].items():
+            self.conditions[name] = self.resolve(expr)
+
+    def resource(self, name):
+        return self.resolve(self.doc["Resources"][name]["Properties"])
+
+    def resolve(self, node):
+        if isinstance(node, list):
+            items = [self.resolve(x) for x in node]
+            return [x for x in items if x is not NO_VALUE]
+        if not isinstance(node, dict):
+            return node
+        if len(node) == 1:
+            (key, arg), = node.items()
+            if key == "Ref":  # A resource gives a placeholder. Only parameters have values here.
+                return self.values[arg] if arg in self.values else f"<{arg}>"
+            if key == "Fn::Sub":
+                text, extra = (arg[0], self.resolve(arg[1])) if isinstance(arg, list) else (arg, {})
+                return re.sub(r"\$\{([^}]+)\}", lambda m: str(extra.get(m[1], self.values.get(m[1]))), text)
+            if key == "Fn::If":
+                return self.resolve(arg[1] if self.conditions[arg[0]] else arg[2])
+            if key == "Fn::Select":
+                return self.resolve(arg[1])[int(arg[0])]
+            if key == "Fn::Split":
+                return self.resolve(arg[1]).split(arg[0])
+            if key == "Fn::Join":
+                return arg[0].join(self.resolve(arg[1]))
+            if key == "Fn::Equals":
+                return self.resolve(arg[0]) == self.resolve(arg[1])
+            if key == "Fn::Not":
+                return not self.resolve(arg[0])
+        out = {k: self.resolve(v) for k, v in node.items()}
+        return {k: v for k, v in out.items() if v is not NO_VALUE}
+
+
+class CloudFormationTest(unittest.TestCase):
+    def setUp(self):
+        self.policy, _ = cjp.read_policy(ROOT / "policy.yaml", ROOT / "no-such.env")
+
+    def test_defaults_match_policy_yaml(self):
+        params = Template().values
+        self.assertEqual(params["BedrockRegion"], self.policy["region"])
+        self.assertEqual({"haiku": params["HaikuProfileId"], "sonnet": params["SonnetProfileId"]},
+                         self.policy["models"], "policy.yaml changed: update the defaults in cloudformation/cjp.yml")
+
+    def test_role_policy_is_the_cjp_iam_policy(self):
+        doc = Template().resource("BedrockJapanPolicy")["PolicyDocument"]
+        self.assertEqual(doc, cjp.iam_policy(self.policy, "123456789012"))
+
+    def test_haiku_only_in_osaka(self):
+        doc = Template(SonnetProfileId="", BedrockRegion="ap-northeast-3").resource("BedrockJapanPolicy")
+        p = cjp.validate_policy({"region": "ap-northeast-3", "models": {"haiku": self.policy["models"]["haiku"]}})
+        self.assertEqual(doc["PolicyDocument"], cjp.iam_policy(p, "123456789012"))
+
+    def test_trust_policy(self):
+        trust = Template().resource("ClaudeCodeRole")["AssumeRolePolicyDocument"]["Statement"][0]
+        self.assertEqual(trust["Principal"], {"AWS": "arn:aws:iam::123456789012:root"})
+        self.assertNotIn("Condition", trust)
+        sso = "arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/*/AWSReservedSSO_Dev_*"
+        trust = Template(TrustedPrincipalArns=sso).resource("ClaudeCodeRole")["AssumeRolePolicyDocument"]
+        self.assertEqual(trust["Statement"][0]["Condition"], {"ArnLike": {"aws:PrincipalArn": [sso]}})
+
+    def test_budget_can_be_turned_off(self):
+        self.assertTrue(Template().conditions["HasBudget"])
+        off = Template(EnableBudget="false")
+        self.assertFalse(off.conditions["HasBudget"])
+        budget_parts = [name for name, res in off.doc["Resources"].items() if res.get("Condition") == "HasBudget"]
+        self.assertEqual(sorted(budget_parts),
+                         ["BudgetActionRole", "MonthlyBudget", "StopAtLimit", "StopBedrockPolicy"])
 
 
 class AwsProfileTest(TempDirTest):

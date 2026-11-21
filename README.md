@@ -10,7 +10,9 @@
 
 It locks the env, writes the policy into `~/.claude/settings.json`, sets up helper tools, starts the proxy, then runs the real `claude` with the same arguments.
 
-See `HANDOVER.md` for decisions, status, and open tasks.
+- Setup from an empty AWS account to a developer PC: `SETUP.md`
+- AWS resources (IAM role, budget with an automatic stop): `cloudformation/cjp.yml`
+- Decisions, status, and open tasks: `HANDOVER.md`
 
 ## Use
 
@@ -73,7 +75,7 @@ The user only needs a login for the source profile (`aws configure`, or `aws con
 
 To use a profile that already exists, set only `CJP_AWS_PROFILE`.
 
-`cjp cjp-iam` prints the IAM policy for the role. With a role ARN in the policy, the account ID is optional.
+`cloudformation/cjp.yml` creates the role (see `SETUP.md`). `cjp cjp-iam` prints the same IAM policy, if you make the role another way. With a role ARN in the policy, the account ID is optional.
 
 ## Proxy
 
@@ -111,11 +113,13 @@ The tests need no AWS account and no real claude. The workflow runs them on Wind
 
 | File | What it is |
 |---|---|
+| `SETUP.md` | Setup steps: AWS account, build, developer PC, operations, troubleshooting |
+| `cloudformation/cjp.yml` | IAM role, assume policy, and monthly budget with an automatic stop |
 | `cjp.py` | The launcher (one file) |
 | `policy.yaml` | Allowed models, AWS login, proxy hosts, and other rules |
 | `.env.example` | Template for `.env`, the build settings of one environment |
 | `build.ps1` / `build.sh` | Build with PyInstaller (Windows / Linux) |
 | `tests/test_cjp.py` | Tests |
-| `.github/workflows/build-windows.yml` | Test, then build `cjp.exe` on a Windows runner |
+| `.github/workflows/build-windows.yml` | Test, lint the template, then build `cjp.exe` on a Windows runner |
 | `pyproject.toml` / `uv.lock` | Python deps for `uv run` |
 | `HANDOVER.md` | Handover notes |

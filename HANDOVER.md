@@ -81,6 +81,8 @@ How the proxy stays in front of claude (checked with Claude Code 2.1.330):
 | First start on a clean PC: uv, rtk, graphify install, rtk hook, graphify skill, CLAUDE.md rules, code graph | Tested: GitHub Actions on Windows (started from PowerShell 7) and Linux, with no corporate proxy. This test found a bug: from PowerShell 7, the uv install failed (`PSModulePath`). Fixed. |
 | The same installs behind a corporate proxy | **Not tested. Test on a real Windows PC.** |
 | Proxy behind a real corporate proxy, and the Windows proxy setting as the source of its address | **Not tested. Test on a real Windows PC.** |
+| `cloudformation/cjp.yml`: cfn-lint for `ap-northeast-1`, and a test that its role policy equals `cjp cjp-iam` | Tested (here and in GitHub Actions) |
+| Deploying the stack, the budget action in a real account | **Not tested. Needs AWS access.** |
 | Login with the IAM role, and real answers from the `jp.` profiles | **Not tested. Needs AWS access.** |
 
 The exe from GitHub Actions is built on a Windows runner. It is not signed. It has `policy.yaml` only (no role, no corporate proxy).
@@ -90,20 +92,23 @@ For production, build on Windows with your `.env`.
 
 ### Must do
 
+Step-by-step commands for these tasks: `SETUP.md`.
+
 1. **Check the profiles in our account.**
    `aws bedrock list-inference-profiles --region ap-northeast-1 --query "inferenceProfileSummaries[?starts_with(inferenceProfileId, 'jp.')].inferenceProfileId"`
    Haiku 5.5 and Sonnet 4.6 must be in the list. Submit the Anthropic use case form once per account.
-2. **Create the role and apply IAM.** Create a normal IAM role for Claude Code. Its trust policy must allow the login of the developers (IAM users, or the SSO role). Run `cjp cjp-iam <account-id>` and attach the output to the role.
+2. **Create the role and apply IAM.** Deploy `cloudformation/cjp.yml` (SETUP.md 1.4). It creates the role with the policy of `cjp cjp-iam`, the `-assume` policy for the developers, and the budget (task 4). Attach the `-assume` policy to the developers (SETUP.md 1.5).
    It allows only the `jp.` profiles and denies Bedrock outside Japan (this also blocks Global routing).
    Use a dedicated role (or account). Other policies like `bedrock:*` would add access back.
    Then put the role into `.env` (`CJP_AWS_ROLE_ARN`, `CJP_AWS_SOURCE_PROFILE`, and for SSO `CJP_AWS_AUTH_REFRESH`) and build.
 3. **Keep Bedrock model invocation logging off.** If it is on, prompts and outputs are saved in S3 or CloudWatch Logs.
-4. **Budgets.** Use a dedicated AWS account and a budget on the whole account
+4. **Budgets.** The stack creates them (`EnableBudget`, `AlertEmail`, `AlertAmount`, `StopAmount`). Use a dedicated AWS account and a budget on the whole account
    (Claude shows up as its own service name, like "Claude Haiku 5.5 (Amazon Bedrock Edition)").
    - $50 actual: email alert.
    - $100 actual: Budget Action "apply IAM policy", automatic, with a deny policy for `bedrock:InvokeModel*`.
    - Budgets data lags 8 to 12 hours. For a hard $100 cap, stop at $80.
    - IAM Identity Center roles (`AWSReservedSSO_*`) can not take the policy directly. Use an SCP or a normal IAM role.
+   - The stop policy stays attached in the next month. AWS does not document an automatic undo. Reverse the action by hand (SETUP.md 4).
 5. **Test on Windows**: first run with network, behind the corporate proxy. Check that uv, rtk, and graphify install, and that `rtk init -g` adds the hook.
    Then check the proxy: `cjp -p hi` must answer, and `%LOCALAPPDATA%\cjp\proxy.log` must show nothing for AWS hosts. A `FAIL` line means the corporate proxy refused cjp (NTLM or Kerberos login: put Px or cntlm in between). If Windows uses a setup script (PAC) for the proxy, cjp can not read it: set `CJP_PROXY_UPSTREAM`.
 6. **Decide the host list.** `proxy.allow_hosts` in `policy.yaml` has GitHub, PyPI, npm, Maven Central, and Gradle. Remove the groups that are not needed. Add internal hosts with `CJP_PROXY_ADD_HOSTS` in `.env`. If the IAM Identity Center is not in Tokyo or Osaka, add `oidc.<region>.amazonaws.com` and `portal.sso.<region>.amazonaws.com`.

@@ -563,6 +563,7 @@ def lock_process_env(p):
 
 def iam_policy(p, account):
     # An IAM policy that allows only the jp. profiles in the policy.
+    # cloudformation/cjp.yml has the same policy. A test checks that both stay the same.
     if not account and p["aws"]["role_arn"]:
         account = p["aws"]["role_arn"].split(":")[4]  # The account of the role in the policy.
     if not re.fullmatch(r"\d{12}", account or ""):
@@ -578,6 +579,10 @@ def iam_policy(p, account):
          "Condition": {"StringEquals": {"bedrock:InferenceProfileArn": profiles}}},
         {"Sid": "AllowProfileDiscovery", "Effect": "Allow",
          "Action": ["bedrock:ListInferenceProfiles", "bedrock:GetInferenceProfile"], "Resource": "*"},
+        # The first call of a model in an account subscribes the account in AWS Marketplace.
+        {"Sid": "AllowFirstUseSubscription", "Effect": "Allow",
+         "Action": ["aws-marketplace:ViewSubscriptions", "aws-marketplace:Subscribe"], "Resource": "*",
+         "Condition": {"StringEquals": {"aws:CalledViaLast": "bedrock.amazonaws.com"}}},
         {"Sid": "DenyBedrockOutsideJapan", "Effect": "Deny", "Action": "bedrock:*", "Resource": "*",
          "Condition": {"StringNotEquals": {"aws:RequestedRegion": list(JP_REGIONS)}}},
     ]

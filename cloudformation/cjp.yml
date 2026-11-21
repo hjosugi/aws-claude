@@ -1,0 +1,320 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  cjp - AWS resources for Claude Code on Amazon Bedrock, in Japan only. An IAM role that can
+  call only the jp. inference profiles, a policy that lets developers assume that role, and a
+  monthly budget that sends an email at the alert amount and blocks Bedrock at the stop amount.
+
+# Deploy in ap-northeast-1. CloudFormation has no Budgets resources in ap-northeast-3.
+# See SETUP.md:
+#   aws cloudformation deploy --region ap-northeast-1 --stack-name cjp \
+#     --template-file cloudformation/cjp.yml --capabilities CAPABILITY_NAMED_IAM \
+#     --parameter-overrides AlertEmail=you@example.co.jp
+#
+# Use a dedicated AWS account. The budget counts the cost of the whole account.
+# The role policy here and the output of "cjp cjp-iam" are the same. A test checks this.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: {default: IAM role for Claude Code}
+        Parameters: [RoleName, TrustedPrincipalArns, MaxSessionDuration]
+      - Label: {default: Models (the same values as policy.yaml)}
+        Parameters: [BedrockRegion, HaikuProfileId, SonnetProfileId]
+      - Label: {default: Budget}
+        Parameters: [EnableBudget, AlertEmail, AlertAmount, StopAmount]
+
+Parameters:
+  RoleName:
+    Type: String
+    Default: claude-code
+    AllowedPattern: "[A-Za-z0-9+=,.@_-]{1,50}"
+    Description: Name of the IAM role. Put its ARN into .env as CJP_AWS_ROLE_ARN.
+  TrustedPrincipalArns:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >-
+      Who may assume the role. Wildcards are allowed. Empty means any IAM user or role in this
+      account that also has the "<RoleName>-assume" policy. Example for IAM Identity Center:
+      arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/*/AWSReservedSSO_Developer_*
+  MaxSessionDuration:
+    Type: Number
+    Default: 3600
+    MinValue: 3600
+    MaxValue: 43200
+    Description: >-
+      Seconds that one role session lasts. The AWS SDK gets a new session by itself when one
+      ends. A role session that starts from an IAM Identity Center role lasts 1 hour at most.
+  BedrockRegion:
+    Type: String
+    Default: ap-northeast-1
+    AllowedValues: [ap-northeast-1, ap-northeast-3]
+    Description: Bedrock source region. The same value as "region" in policy.yaml (CJP_REGION).
+  HaikuProfileId:
+    Type: String
+    Default: jp.anthropic.claude-haiku-5-5
+    AllowedPattern: "jp\\.anthropic\\.[a-z0-9.:-]+"
+    Description: The same value as models.haiku in policy.yaml (CJP_MODEL_HAIKU).
+  SonnetProfileId:
+    Type: String
+    Default: jp.anthropic.claude-sonnet-4-6
+    AllowedPattern: "(jp\\.anthropic\\.[a-z0-9.:-]+)?"
+    Description: The same value as models.sonnet in policy.yaml (CJP_MODEL_SONNET). Empty for Haiku only.
+  EnableBudget:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Create the monthly budget, the email alerts, and the automatic stop.
+  AlertEmail:
+    Type: String
+    Default: ""
+    AllowedPattern: "([^@\\s]+@[^@\\s]+)?"
+    Description: Email address for the budget alerts. Needed when EnableBudget is true.
+  AlertAmount:
+    Type: Number
+    Default: 50
+    MinValue: 1
+    Description: USD per month. An email is sent when the actual cost goes over this amount.
+  StopAmount:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    Description: >-
+      USD per month. When the actual cost goes over this amount, the role can no longer call
+      Bedrock. Cost data lags 8 to 12 hours, so the real stop comes later. For a hard cap of
+      100, use 80.
+
+Rules:
+  BudgetNeedsEmail:
+    RuleCondition: !Equals [!Ref EnableBudget, "true"]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref AlertEmail, ""]]
+        AssertDescription: Set AlertEmail, or set EnableBudget to false.
+
+Conditions:
+  HasSonnet: !Not [!Equals [!Ref SonnetProfileId, ""]]
+  HasTrustedPrincipals: !Not [!Equals [!Join ["", !Ref TrustedPrincipalArns], ""]]
+  HasBudget: !Equals [!Ref EnableBudget, "true"]
+
+Resources:
+  BedrockJapanPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Call only the jp. inference profiles of cjp. No Bedrock outside Japan.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowJpProfiles
+            Effect: Allow
+            Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+            Resource:
+              - !Sub arn:${AWS::Partition}:bedrock:${BedrockRegion}:${AWS::AccountId}:inference-profile/${HaikuProfileId}
+              - !If
+                - HasSonnet
+                - !Sub arn:${AWS::Partition}:bedrock:${BedrockRegion}:${AWS::AccountId}:inference-profile/${SonnetProfileId}
+                - !Ref AWS::NoValue
+          # A jp. profile sends each request to Tokyo or Osaka. The model there may only be
+          # called through the profiles above.
+          - Sid: AllowModelsOnlyViaJpProfiles
+            Effect: Allow
+            Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+            Resource:
+              - !Sub
+                - arn:${AWS::Partition}:bedrock:ap-northeast-1::foundation-model/${Model}
+                - Model: !Select [1, !Split ["jp.", !Ref HaikuProfileId]]
+              - !Sub
+                - arn:${AWS::Partition}:bedrock:ap-northeast-3::foundation-model/${Model}
+                - Model: !Select [1, !Split ["jp.", !Ref HaikuProfileId]]
+              - !If
+                - HasSonnet
+                - !Sub
+                  - arn:${AWS::Partition}:bedrock:ap-northeast-1::foundation-model/${Model}
+                  - Model: !Select [1, !Split ["jp.", !Ref SonnetProfileId]]
+                - !Ref AWS::NoValue
+              - !If
+                - HasSonnet
+                - !Sub
+                  - arn:${AWS::Partition}:bedrock:ap-northeast-3::foundation-model/${Model}
+                  - Model: !Select [1, !Split ["jp.", !Ref SonnetProfileId]]
+                - !Ref AWS::NoValue
+            Condition:
+              StringEquals:
+                bedrock:InferenceProfileArn:
+                  - !Sub arn:${AWS::Partition}:bedrock:${BedrockRegion}:${AWS::AccountId}:inference-profile/${HaikuProfileId}
+                  - !If
+                    - HasSonnet
+                    - !Sub arn:${AWS::Partition}:bedrock:${BedrockRegion}:${AWS::AccountId}:inference-profile/${SonnetProfileId}
+                    - !Ref AWS::NoValue
+          - Sid: AllowProfileDiscovery
+            Effect: Allow
+            Action: [bedrock:ListInferenceProfiles, bedrock:GetInferenceProfile]
+            Resource: "*"
+          # The first call of a model in an account subscribes the account to it in
+          # AWS Marketplace. Only Bedrock may do this for the role.
+          - Sid: AllowFirstUseSubscription
+            Effect: Allow
+            Action: [aws-marketplace:ViewSubscriptions, aws-marketplace:Subscribe]
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:CalledViaLast: bedrock.amazonaws.com
+          # Also blocks Global routing, because those calls go to regions outside Japan.
+          - Sid: DenyBedrockOutsideJapan
+            Effect: Deny
+            Action: bedrock:*
+            Resource: "*"
+            Condition:
+              StringNotEquals:
+                aws:RequestedRegion: [ap-northeast-1, ap-northeast-3]
+
+  ClaudeCodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: Claude Code through cjp. Bedrock in Japan only.
+      MaxSessionDuration: !Ref MaxSessionDuration
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: sts:AssumeRole
+            Condition: !If
+              - HasTrustedPrincipals
+              - ArnLike:
+                  aws:PrincipalArn: !Ref TrustedPrincipalArns
+              - !Ref AWS::NoValue
+      ManagedPolicyArns:
+        - !Ref BedrockJapanPolicy
+
+  # Attach this to the IAM group of the developers, or add it to their permission set in
+  # IAM Identity Center (as a customer managed policy with this name).
+  AssumeRolePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${RoleName}-assume
+      Description: Lets a developer assume the Claude Code role.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AssumeClaudeCodeRole
+            Effect: Allow
+            Action: sts:AssumeRole
+            Resource: !GetAtt ClaudeCodeRole.Arn
+
+  # Not attached at first. The budget action attaches it at the stop amount.
+  StopBedrockPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: HasBudget
+    Properties:
+      Description: Applied by the budget action at the stop amount. Blocks all model calls.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyBedrockInference
+            Effect: Deny
+            Action: bedrock:InvokeModel*
+            Resource: "*"
+
+  # AWS Budgets uses this role to attach the stop policy. It can attach only that policy,
+  # and only to the Claude Code role.
+  BudgetActionRole:
+    Type: AWS::IAM::Role
+    Condition: HasBudget
+    Properties:
+      Description: AWS Budgets attaches the stop policy to the Claude Code role.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: budgets.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:budgets::${AWS::AccountId}:budget/*
+      Policies:
+        - PolicyName: apply-stop-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [iam:AttachRolePolicy, iam:DetachRolePolicy]
+                Resource: !GetAtt ClaudeCodeRole.Arn
+                Condition:
+                  ArnEquals:
+                    iam:PolicyARN: !Ref StopBedrockPolicy
+
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Condition: HasBudget
+    Properties:
+      Budget:
+        BudgetName: !Sub ${AWS::StackName}-monthly
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref StopAmount
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: !Ref AlertAmount
+            ThresholdType: ABSOLUTE_VALUE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+
+  # The policy stays attached after the month ends. Reverse the action in the Budgets
+  # console (Budgets > the budget > Alerts and actions > history > Reverse). See SETUP.md.
+  StopAtLimit:
+    Type: AWS::Budgets::BudgetsAction
+    Condition: HasBudget
+    DependsOn: MonthlyBudget
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W1030]  # AlertEmail can not be empty here: see the rule BudgetNeedsEmail.
+    Properties:
+      BudgetName: !Sub ${AWS::StackName}-monthly
+      NotificationType: ACTUAL
+      ActionType: APPLY_IAM_POLICY
+      ActionThreshold:
+        Type: ABSOLUTE_VALUE
+        Value: !Ref StopAmount
+      ApprovalModel: AUTOMATIC
+      ExecutionRoleArn: !GetAtt BudgetActionRole.Arn
+      Definition:
+        IamActionDefinition:
+          PolicyArn: !Ref StopBedrockPolicy
+          Roles:
+            - !Ref ClaudeCodeRole
+      Subscribers:
+        - Type: EMAIL
+          Address: !Ref AlertEmail
+
+Outputs:
+  RoleArn:
+    Description: Put this into .env as CJP_AWS_ROLE_ARN.
+    Value: !GetAtt ClaudeCodeRole.Arn
+  EnvLine:
+    Description: The line for .env.
+    Value: !Sub CJP_AWS_ROLE_ARN=${ClaudeCodeRole.Arn}
+  AssumePolicyName:
+    Description: Attach this policy to the developers (IAM group, or IAM Identity Center permission set).
+    Value: !Sub ${RoleName}-assume
+  StopPolicyArn:
+    Condition: HasBudget
+    Description: The deny policy that the budget action attaches at the stop amount.
+    Value: !Ref StopBedrockPolicy

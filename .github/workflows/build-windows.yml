@@ -21,6 +21,14 @@ jobs:
       - name: Test
         run: uv run python -m unittest discover -s tests -v
 
+  cloudformation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Lint the CloudFormation template
+        run: uvx cfn-lint --regions ap-northeast-1 -- cloudformation/cjp.yml
+
   # A first start on a clean PC: cjp installs uv, rtk, and graphify from the network,
   # adds the rtk hook and the graphify skill, and builds the code graph.
   # This job does not block the build, because it depends on other projects' servers.
