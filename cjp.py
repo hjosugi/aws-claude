@@ -1,39 +1,49 @@
 #!/usr/bin/env python3
 """cjp - start Claude Code with Amazon Bedrock, in Japan only.
 
-The policy comes from policy.yaml.
-  - Source mode (python cjp.py): reads policy.yaml next to this file.
+The policy comes from policy.yaml. Values in .env replace values in policy.yaml.
+  - Source mode (python cjp.py): reads policy.yaml and .env next to this file.
   - Built exe: uses the policy embedded at build time. Users can not change it.
 
 On every start:
-  1. Lock the process env: Bedrock only, Japan region, allowed jp. models only.
+  1. Lock the process env: Bedrock only, Japan region, allowed jp. models only,
+     and the AWS profile of the policy (no claude.ai login, no API key).
   2. Make sure the helper tools are installed: uv, rtk, and graphify.
   3. Write the policy into ~/.claude/settings.json.
   4. In a git repo, add CLAUDE.md rules and refresh the code graph in the background.
-  5. Run the real claude with the same arguments.
+  5. Start a local proxy that only lets the allowed hosts through.
+  6. Run the real claude with the same arguments, behind that proxy.
 
 Extra commands (claude has no commands with these names):
   cjp xlsx-peek <file> [...]   small summary of an Excel file
   cjp cjp-policy               show the policy and the settings it writes
-  cjp cjp-iam <account-id>     print an IAM policy that allows only these models
+  cjp cjp-iam [account-id]     print an IAM policy that allows only these models
 
 Env vars (they can not weaken the policy):
   CLAUDE_REAL_BIN       path to the real claude binary
   CJP_SKIP_SETUP=1      skip tool installs and project files (the policy still applies)
   CJP_NO_INSTALL=1      do not install missing tools
+  CJP_POLICY            source mode only: path to another policy.yaml
+  CJP_ENV_FILE          source mode and build only: path to another .env
 """
 import argparse
+import base64
+import configparser
 import copy
+import functools
 import hashlib
 import json
 import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -43,7 +53,34 @@ import yaml
 APP = "cjp"
 IS_WIN = os.name == "nt"
 POLICY_FILE = "policy.yaml"
+ENV_FILE = ".env"
 EMBED_MODULE = "cjp_policy_embedded"
+
+# Keys for .env (see .env.example). Each key replaces one value of policy.yaml.
+# Two special cases: a model key with the value "none" removes that model, and
+# CJP_PROXY_ADD_HOSTS adds hosts to the list in policy.yaml.
+ENV_KEYS = {
+    "CJP_REGION": ("region", str),
+    "CJP_MODEL_HAIKU": ("models.haiku", str),
+    "CJP_MODEL_SONNET": ("models.sonnet", str),
+    "CJP_MODEL_OPUS": ("models.opus", str),
+    "CJP_DEFAULT_MODEL": ("default_model", str),
+    "CJP_AUTO_COMPACT_WINDOW": ("auto_compact_window", int),
+    "CJP_EFFORT_LEVEL": ("effort_level", str),
+    "CJP_ALLOW_WEB_FETCH": ("allow_web_fetch", bool),
+    "CJP_BLOCK_GREP": ("block_grep", bool),
+    "CJP_TOOL_RTK": ("tools.rtk", bool),
+    "CJP_TOOL_GRAPHIFY": ("tools.graphify", bool),
+    "CJP_AWS_PROFILE": ("aws.profile", str),
+    "CJP_AWS_ROLE_ARN": ("aws.role_arn", str),
+    "CJP_AWS_SOURCE_PROFILE": ("aws.source_profile", str),
+    "CJP_AWS_AUTH_REFRESH": ("aws.auth_refresh", str),
+    "CJP_PROXY": ("proxy.enabled", bool),
+    "CJP_PROXY_UPSTREAM": ("proxy.upstream", str),
+    "CJP_PROXY_ADD_HOSTS": ("proxy.allow_hosts", list),
+}
+BOOL_WORDS = {"1": True, "true": True, "yes": True, "on": True,
+              "0": False, "false": False, "no": False, "off": False}
 
 JP_REGIONS = ("ap-northeast-1", "ap-northeast-3")
 TIERS = ("haiku", "sonnet", "opus")
@@ -60,7 +97,23 @@ FORBIDDEN_ENV = (
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE",
     "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION",
+    "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",  # claude.ai subscription login
 )
+# These env vars give AWS credentials without the profile. When the policy names a
+# profile, cjp removes them. A Bedrock API key would even skip the credential chain.
+AWS_CRED_ENV = (
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE",
+)
+PROFILE_RE = r"[A-Za-z0-9_.@+-]+"
+ROLE_ARN_RE = r"arn:aws:iam::\d{12}:role/[\w+=,.@/-]+"
+HOST_RE = r"(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)*"
+
+# The proxy always allows these AWS services in the Japan regions:
+# inference, model list, role login (STS), and IAM Identity Center login.
+AWS_SERVICES = ("bedrock-runtime", "bedrock", "sts", "oidc", "portal.sso")
+PROXY_URL_ENV = ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY")  # Claude Code reads them in this order.
+LOOPBACK = "localhost,127.0.0.1,::1"
 # These env vars pick a model. cjp keeps them only when the value is an allowed model.
 MODEL_ENV = (
     "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
@@ -230,6 +283,103 @@ def is_jp_model(model_id):
     return re.match(r"^arn:aws:bedrock:ap-northeast-[13]:\d{12}:application-inference-profile/", model_id) is not None
 
 
+def parse_dotenv(text):
+    # KEY=VALUE lines. "#" starts a comment. Quotes around a value are removed.
+    values = {}
+    for n, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, sep, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise PolicyError(f".env line {n}: expected KEY=VALUE")
+        if len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]:
+            value = value[1:-1]
+        else:
+            value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+        values[key] = value
+    return values
+
+
+def env_overrides(env_file):
+    # The CJP_ keys from the .env file, then from the process env (the process env wins).
+    # An empty value means "not set".
+    values = {}
+    if env_file.exists():
+        for key, value in parse_dotenv(read_text(env_file)).items():
+            if key in ENV_KEYS:
+                values[key] = value
+            elif key.startswith("CJP_"):
+                raise PolicyError(f"{env_file}: unknown key {key}. Known keys: {', '.join(ENV_KEYS)}")
+    for key in ENV_KEYS:
+        if key in os.environ:
+            values[key] = os.environ[key]
+    return {key: value for key, value in values.items() if value}
+
+
+def apply_overrides(raw, values):
+    # Put the .env values into the raw policy.
+    for key, text in values.items():
+        path, kind = ENV_KEYS[key]
+        node = raw
+        *parents, leaf = path.split(".")
+        for name in parents:
+            if not isinstance(node.get(name), dict):
+                node[name] = {}
+            node = node[name]
+        if kind is bool:
+            if text.lower() not in BOOL_WORDS:
+                raise PolicyError(f"{key}: use true or false, got {text!r}")
+            node[leaf] = BOOL_WORDS[text.lower()]
+        elif kind is int:
+            if not text.isdigit():
+                raise PolicyError(f"{key}: use a number, got {text!r}")
+            node[leaf] = int(text)
+        elif kind is list:
+            old = node.get(leaf) if isinstance(node.get(leaf), list) else []
+            node[leaf] = old + [x for x in re.split(r"[,\s]+", text) if x]
+        elif parents == ["models"] and text.lower() == "none":
+            node.pop(leaf, None)
+        else:
+            node[leaf] = text
+
+
+def read_policy(policy_path, env_file):
+    # policy.yaml plus the .env values. Return (clean policy, the .env keys that were used).
+    if not policy_path.exists():
+        raise PolicyError(f"{policy_path} was not found")
+    raw = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise PolicyError("the policy must be a YAML mapping")
+    values = env_overrides(env_file)
+    apply_overrides(raw, values)
+    return validate_policy(raw), sorted(values)
+
+
+def parse_proxy_url(url):
+    # Return (host, port, basic auth or "") for an http:// proxy URL, else None.
+    try:
+        u = urllib.parse.urlsplit(url)
+        host, port = u.hostname, u.port or 80
+    except ValueError:
+        return None
+    if u.scheme != "http" or not host:
+        return None
+    auth = ""
+    if u.username:
+        login = f"{urllib.parse.unquote(u.username)}:{urllib.parse.unquote(u.password or '')}"
+        auth = base64.b64encode(login.encode("utf-8")).decode("ascii")
+    return host, port, auth
+
+
+def mask_url(url):
+    # Hide a user name and password before the URL is printed.
+    return re.sub(r"//[^@/]*@", "//***@", url)
+
+
 def validate_policy(raw):
     # Check the YAML and return a clean dict. Raise PolicyError on any problem.
     if not isinstance(raw, dict):
@@ -260,6 +410,38 @@ def validate_policy(raw):
     if not isinstance(tools, dict):
         errors.append("tools must be a mapping")
         tools = {}
+    aws = raw.get("aws") or {}
+    if not isinstance(aws, dict):
+        errors.append("aws must be a mapping")
+        aws = {}
+    aws = {k: str(aws.get(k) or "").strip() for k in ("profile", "role_arn", "source_profile", "auth_refresh")}
+    if aws["role_arn"]:
+        if not re.fullmatch(ROLE_ARN_RE, aws["role_arn"]):
+            errors.append(f"aws.role_arn: {aws['role_arn']!r} is not an IAM role ARN")
+        aws["profile"] = aws["profile"] or APP
+        aws["source_profile"] = aws["source_profile"] or "default"
+        if aws["profile"] == aws["source_profile"]:
+            errors.append("aws.profile and aws.source_profile must be different")
+    elif aws["source_profile"]:
+        errors.append("aws.source_profile needs aws.role_arn")
+    for key in ("profile", "source_profile"):
+        if aws[key] and not re.fullmatch(PROFILE_RE, aws[key]):
+            errors.append(f"aws.{key}: {aws[key]!r} is not a profile name")
+    proxy = raw.get("proxy") or {}
+    if not isinstance(proxy, dict):
+        errors.append("proxy must be a mapping")
+        proxy = {}
+    upstream = str(proxy.get("upstream") or "").strip()
+    if upstream and parse_proxy_url(upstream) is None:
+        errors.append(f"proxy.upstream: use http://host:port, got {mask_url(upstream)!r}")
+    hosts = proxy.get("allow_hosts") or []
+    if not isinstance(hosts, list):
+        errors.append("proxy.allow_hosts must be a list")
+        hosts = []
+    hosts = list(dict.fromkeys(str(h).strip().lower() for h in hosts))  # No doubles, same order.
+    for host in hosts:
+        if not re.fullmatch(HOST_RE, host):
+            errors.append(f"proxy.allow_hosts: {host!r} is not a host name (use name or *.name)")
     if errors:
         raise PolicyError("\n".join(errors))
     return {
@@ -271,21 +453,24 @@ def validate_policy(raw):
         "allow_web_fetch": bool(raw.get("allow_web_fetch", False)),
         "block_grep": bool(raw.get("block_grep", False)),
         "tools": {"rtk": bool(tools.get("rtk", True)), "graphify": bool(tools.get("graphify", True))},
+        "aws": aws,
+        "proxy": {"enabled": bool(proxy.get("enabled", True)), "upstream": upstream, "allow_hosts": hosts},
     }
 
 
 def load_policy():
-    # Built exe: only the embedded policy. Source mode: policy.yaml next to this file.
+    # Built exe: only the embedded policy. Source mode: policy.yaml and .env next to this file.
     if frozen():
         try:
             import cjp_policy_embedded as embedded
         except ImportError:
             raise PolicyError("this exe has no embedded policy. Build it with build.ps1.")
         return validate_policy(yaml.safe_load(embedded.POLICY_YAML)), "embedded in the exe"
-    path = Path(os.environ.get("CJP_POLICY", Path(__file__).with_name(POLICY_FILE)))
-    if not path.exists():
-        raise PolicyError(f"{path} was not found")
-    return validate_policy(yaml.safe_load(path.read_text(encoding="utf-8"))), str(path)
+    here = Path(__file__)
+    path = Path(os.environ.get("CJP_POLICY") or here.with_name(POLICY_FILE))
+    env_file = Path(os.environ.get("CJP_ENV_FILE") or here.with_name(ENV_FILE))
+    policy, keys = read_policy(path, env_file)
+    return policy, str(path) + (f", with {', '.join(keys)} from .env or the environment" if keys else "")
 
 
 def required_settings(p):
@@ -295,9 +480,15 @@ def required_settings(p):
         "AWS_REGION": p["region"],
         "ANTHROPIC_BEDROCK_REGION_PREFIX": "jp",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        # "Nonessential traffic" does not cover the next two. Both go to hosts outside AWS:
+        # MCP servers from a claude.ai account, and the plugin marketplace.
+        "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+        "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
     }
     for tier, model_id in p["models"].items():
         env[f"ANTHROPIC_DEFAULT_{tier.upper()}_MODEL"] = model_id
+    if p["aws"]["profile"]:
+        env["AWS_PROFILE"] = p["aws"]["profile"]
     if p["tools"]["graphify"]:
         env["GRAPHIFY_HOOK_STRICT"] = "1"  # Ask the graph before the first raw source read.
     deny = READ_DENY + ["WebSearch"]
@@ -305,33 +496,46 @@ def required_settings(p):
         deny.append("WebFetch")
     if p["block_grep"]:
         deny += GREP_DENY
-    return {
+    settings = {
         "model": p["default_model"],
         "availableModels": list(p["models"].values()),
         "enforceAvailableModels": True,
         "autoCompactWindow": p["auto_compact_window"],
         "effortLevel": p["effort_level"],
+        # Without this, WebFetch sends each host name to api.anthropic.com before it fetches.
+        "skipWebFetchPreflight": True,
         "env": env,
         "permissions": {"deny": deny},
     }
+    if p["aws"]["auth_refresh"]:
+        settings["awsAuthRefresh"] = p["aws"]["auth_refresh"]
+    return settings
 
 
-def env_violation(key, value, allowed_models):
-    # Return a reason if this env var breaks "Bedrock in Japan only", else None.
+def forbidden_settings(p):
+    # Settings keys that would give claude other AWS credentials than the profile of the policy.
+    return ["awsCredentialExport"] if p["aws"]["profile"] else []
+
+
+def env_violation(key, value, p):
+    # Return a reason if this env var breaks the policy, else None.
     if key in FORBIDDEN_ENV:
         return "not allowed (Bedrock only)"
-    if key in MODEL_ENV and value not in allowed_models:
+    if key in MODEL_ENV and value not in p["models"].values():
         return f"model {value!r} is not in the policy"
     if key == "ANTHROPIC_BEDROCK_BASE_URL" and not any(f".{r}." in value for r in JP_REGIONS):
         return "endpoint is not in a Japan region"
     if key == "CLAUDE_CODE_USE_BEDROCK" and value != "1":
         return "Bedrock must be on"
+    profile = p["aws"]["profile"]
+    if profile and (key in AWS_CRED_ENV or (key == "AWS_PROFILE" and value != profile)):
+        return f"the policy uses the AWS profile {profile!r}"
     return None
 
 
-def clean_env(env, allowed_models):
+def clean_env(env, p):
     # Remove bad keys from an env mapping. Return the removed keys with reasons.
-    bad = {k: env_violation(k, str(v), allowed_models) for k, v in env.items()}
+    bad = {k: env_violation(k, str(v), p) for k, v in env.items()}
     bad = {k: why for k, why in bad.items() if why}
     for k in bad:
         env.pop(k, None)
@@ -339,15 +543,17 @@ def clean_env(env, allowed_models):
 
 
 def lock_process_env(p):
-    # The process env wins for claude and every tool it starts.
-    allowed = set(p["models"].values())
-    for key, why in clean_env(os.environ, allowed).items():
+    # For the tools that cjp starts. For claude, the env in the settings wins over the
+    # process env, so ensure_settings() writes the same values there.
+    for key, why in clean_env(os.environ, p).items():
         note(f"removed {key} from the environment: {why}")
     os.environ.update(required_settings(p)["env"])
 
 
 def iam_policy(p, account):
     # An IAM policy that allows only the jp. profiles in the policy.
+    if not account and p["aws"]["role_arn"]:
+        account = p["aws"]["role_arn"].split(":")[4]  # The account of the role in the policy.
     if not re.fullmatch(r"\d{12}", account or ""):
         raise PolicyError("give a 12-digit AWS account ID")
     invoke = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
@@ -368,15 +574,77 @@ def iam_policy(p, account):
 
 
 def embed_policy(args):
-    # Build step: check policy.yaml and write it into a module for PyInstaller.
-    path = Path(args[0]) if args else Path(__file__).with_name(POLICY_FILE)
-    text = path.read_text(encoding="utf-8")
-    validate_policy(yaml.safe_load(text))  # A bad policy stops the build.
-    out = Path(__file__).with_name(EMBED_MODULE + ".py")
+    # Build step: merge policy.yaml and .env, check the result, and write it into a
+    # module for PyInstaller. Usage: --cjp-embed-policy [policy.yaml] [--env-file FILE]
+    here = Path(__file__)
+    path, env_file = here.with_name(POLICY_FILE), None
+    args = list(args)
+    while args:
+        arg = args.pop(0)
+        if arg != "--env-file":
+            path = Path(arg)
+        elif not args:
+            raise PolicyError("--env-file needs a path")
+        else:
+            env_file = Path(args.pop(0))
+            if not env_file.exists():
+                raise PolicyError(f"{env_file} was not found")
+    if env_file is None:
+        env_file = Path(os.environ.get("CJP_ENV_FILE") or here.with_name(ENV_FILE))
+    policy, keys = read_policy(path, env_file)  # A bad policy stops the build.
+    text = yaml.safe_dump(policy, sort_keys=False, allow_unicode=True)
+    out = here.with_name(EMBED_MODULE + ".py")
     with open(out, "w", encoding="utf-8", newline="") as f:
         f.write("# Generated by: python cjp.py --cjp-embed-policy. Do not edit.\n")
         f.write(f"POLICY_YAML = {text!r}\n")
-    print(f"embedded {path} into {out}")
+    print(f"embedded {path} into {out}" + (f" (values from .env: {', '.join(keys)})" if keys else ""))
+
+
+# ---------------------------------------------------------------------------
+# AWS profile
+# ---------------------------------------------------------------------------
+
+
+def aws_file(env_name, name):
+    return Path(os.environ.get(env_name) or Path.home() / ".aws" / name)
+
+
+def aws_profiles(path):
+    # The profiles in an AWS config or credentials file: {name: {option: value}}.
+    parser = configparser.RawConfigParser(strict=False, allow_no_value=True)
+    parser.read_string(read_text(path))
+    profiles = {}
+    for section in parser.sections():
+        name = section[len("profile "):].strip() if section.startswith("profile ") else section
+        profiles[name] = dict(parser.items(section))
+    return profiles
+
+
+def ensure_aws_profile(p):
+    # The policy can name the AWS profile. With a role ARN, cjp also creates that profile.
+    aws = p["aws"]
+    name = aws["profile"]
+    if not name:
+        return
+    config = aws_file("AWS_CONFIG_FILE", "config")
+    known = aws_profiles(config)
+    logins = aws_profiles(aws_file("AWS_SHARED_CREDENTIALS_FILE", "credentials"))
+    if not aws["role_arn"]:
+        if name not in known and name not in logins:
+            note(f"the AWS profile {name!r} was not found in {config}. Create it, then start {APP} again.")
+        return
+    if name not in known:
+        header = "default" if name == "default" else f"profile {name}"
+        append_text(config, f"\n[{header}]\nrole_arn = {aws['role_arn']}\n"
+                            f"source_profile = {aws['source_profile']}\nregion = {p['region']}\n")
+        note(f"added the AWS profile {name!r} for {aws['role_arn']} to {config}")
+    elif known[name].get("role_arn") != aws["role_arn"]:
+        sys.exit(f"[{APP}] the AWS profile {name!r} in {config} does not use the role of the policy "
+                 f"({aws['role_arn']}). Fix or remove that profile.")
+    source = aws["source_profile"]
+    if source not in known and source not in logins:
+        note(f"the AWS profile {source!r} (the login for the role) was not found. "
+             "Create it with: aws configure, or aws configure sso.")
 
 
 # ---------------------------------------------------------------------------
@@ -521,8 +789,11 @@ def ensure_settings(settings_path, p):
         return
     changes = []
     if isinstance(settings.get("env"), dict):
-        for key, why in clean_env(settings["env"], set(p["models"].values())).items():
+        for key, why in clean_env(settings["env"], p).items():
             changes.append(f"removed env.{key} ({why})")
+    for key in forbidden_settings(p):
+        if settings.pop(key, None) is not None:
+            changes.append(f"removed {key} (the policy uses an AWS profile)")
     apply_required(settings, required_settings(p), changes)
     if changes:
         write_json(settings_path, settings)
@@ -530,27 +801,31 @@ def ensure_settings(settings_path, p):
 
 
 def check_project_settings(p):
-    # Project settings override user settings. A shared file with bad env stops cjp.
+    # Project settings override user settings. A shared file that breaks the policy stops cjp.
     root = git_root()
     if root is None:
         return
-    allowed = set(p["models"].values())
     for rel, can_fix in ((".claude/settings.local.json", True), (".claude/settings.json", False)):
         path = root / rel
         data, err = load_json(path)
-        if err or not isinstance(data, dict) or not isinstance(data.get("env"), dict):
+        if err or not isinstance(data, dict):
             continue
-        env = dict(data["env"])
-        bad = clean_env(env, allowed)
+        has_env = isinstance(data.get("env"), dict)
+        env = dict(data["env"]) if has_env else {}
+        bad = clean_env(env, p)
+        bad.update({k: "the policy uses an AWS profile" for k in forbidden_settings(p) if k in data})
         if not bad:
             continue
         if can_fix:
-            data["env"] = env
+            if has_env:
+                data["env"] = env
+            for key in forbidden_settings(p):
+                data.pop(key, None)
             write_json(path, data)
             note(f"removed {sorted(bad)} from {path}")
         else:
-            sys.exit(f"[{APP}] {path} sets env that breaks the policy: {bad}. "
-                     "Remove it, or ask the repo owner.")
+            sys.exit(f"[{APP}] {path} has settings that break the policy: {bad}. "
+                     "Remove them, or ask the repo owner.")
 
 
 # ---------------------------------------------------------------------------
@@ -713,6 +988,269 @@ def xlsx_peek(argv):
 
 
 # ---------------------------------------------------------------------------
+# Proxy: claude and the tools it starts can only reach the allowed hosts
+# ---------------------------------------------------------------------------
+
+
+def allowed_hosts(p):
+    # The AWS endpoints in the Japan regions, plus the hosts from the policy.
+    hosts = [f"{service}.{region}.amazonaws.com" for region in JP_REGIONS for service in AWS_SERVICES]
+    return hosts + [h for h in p["proxy"]["allow_hosts"] if h not in hosts]
+
+
+def host_allowed(host, patterns):
+    # "name" matches that host only. "*.name" matches every host below name.
+    host = host.lower().rstrip(".")
+    return any(host.endswith(pat[1:]) if pat.startswith("*.") else host == pat for pat in patterns)
+
+
+def find_upstream(p, settings):
+    # The proxy that our proxy must go through (a corporate proxy), or None.
+    # Order: the policy, the env, the user settings, the OS settings.
+    env = settings.get("env") if isinstance(settings.get("env"), dict) else {}
+    found = [("the policy", p["proxy"]["upstream"])]
+    found += [(key, os.environ.get(key, "")) for key in PROXY_URL_ENV]
+    found += [(f"env.{key} in the settings", str(env.get(key) or "")) for key in PROXY_URL_ENV]
+    try:
+        system = urllib.request.getproxies()  # On Windows this reads the Internet settings.
+    except Exception:
+        system = {}
+    found += [("the OS settings", system.get(scheme, "")) for scheme in ("https", "http")]
+    for source, url in found:
+        if not url:
+            continue
+        upstream = parse_proxy_url(url)
+        if upstream:
+            return upstream
+        note(f"the proxy from {source} is not an http:// proxy. Ignored: {mask_url(url)}")
+    return None
+
+
+@functools.lru_cache(maxsize=256)
+def proxy_bypass(host):
+    # True if NO_PROXY (or the OS setting) says: connect to this host without the upstream proxy.
+    try:
+        return bool(urllib.request.proxy_bypass(host))
+    except Exception:
+        return False
+
+
+def read_head(sock, limit=65536):
+    # Read up to the blank line that ends the HTTP headers. Return (head, the bytes after it).
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = sock.recv(8192)
+        if not chunk or len(data) > limit:
+            return None, b""
+        data += chunk
+    head, _, rest = data.partition(b"\r\n\r\n")
+    return head.decode("latin-1"), rest
+
+
+def send_reply(sock, code, reason, text):
+    body = f"{APP} proxy: {text}\n".encode("utf-8")
+    head = (f"HTTP/1.1 {code} {reason}\r\nContent-Type: text/plain; charset=utf-8\r\n"
+            f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n")
+    sock.sendall(head.encode("ascii") + body)
+
+
+def copy_stream(src, dst):
+    # Copy until src ends, then tell dst that no more data comes.
+    try:
+        while True:
+            data = src.recv(65536)
+            if not data:
+                break
+            dst.sendall(data)
+        dst.shutdown(socket.SHUT_WR)
+    except OSError:
+        # One broken side ends both directions. shutdown() also wakes the other thread.
+        for s in (src, dst):
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+
+class Proxy:
+    # A small HTTP proxy on 127.0.0.1. It refuses every host that is not in the list.
+
+    def __init__(self, allow, upstream, log_path):
+        self.allow, self.upstream, self.log_path = allow, upstream, log_path
+        self.lock = threading.Lock()
+        self.logged = set()
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.bind(("127.0.0.1", 0))  # Port 0: the OS picks a free port.
+        self.sock.listen(128)
+        self.port = self.sock.getsockname()[1]
+
+    def serve(self):
+        while True:
+            try:
+                client, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.handle, args=(client,), daemon=True).start()
+
+    def log(self, text):
+        # One line per event and host in each run, so the file stays small.
+        with self.lock:
+            if text in self.logged:
+                return
+            self.logged.add(text)
+            try:
+                with open(self.log_path, "a", encoding="utf-8") as f:
+                    f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text + "\n")
+            except OSError:
+                pass
+
+    def handle(self, client):
+        remote = None
+        try:
+            client.settimeout(60)
+            head, early = read_head(client)
+            if head is None:
+                return
+            lines = head.split("\r\n")
+            parts = lines[0].split(" ")
+            if len(parts) != 3:
+                return send_reply(client, 400, "Bad Request", "bad request line")
+            method, target = parts[0], parts[1]
+            tunnel = method.upper() == "CONNECT"
+            try:
+                url = urllib.parse.urlsplit("//" + target if tunnel else target)
+                host, port = url.hostname, url.port or (443 if tunnel else 80)
+            except ValueError:
+                host = None
+            if not host or (not tunnel and url.scheme != "http"):
+                return send_reply(client, 400, "Bad Request", "use CONNECT host:port or an http:// URL")
+            if not host_allowed(host, self.allow):
+                self.log(f"BLOCK {host}:{port}")
+                return send_reply(client, 403, "Forbidden", f"{host} is not in the allowed hosts of the policy")
+            use_upstream = bool(self.upstream) and not proxy_bypass(host)
+            try:
+                remote = socket.create_connection(self.upstream[:2] if use_upstream else (host, port), timeout=30)
+                late = self.open_tunnel(remote, host, port) if tunnel and use_upstream else b""
+            except OSError as e:
+                self.log(f"FAIL {host}:{port} {e}")
+                return send_reply(client, 502, "Bad Gateway", f"can not reach {host}:{port}: {e}")
+            if tunnel:
+                client.settimeout(None)  # A streamed answer can be quiet for a long time.
+                remote.settimeout(None)
+                client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n" + late)
+                remote.sendall(early)
+                back = threading.Thread(target=copy_stream, args=(remote, client), daemon=True)
+                back.start()
+                copy_stream(client, remote)
+                back.join()
+            else:
+                remote.settimeout(600)
+                self.send_http(client, remote, method, target, url, lines[1:], early, use_upstream)
+        except OSError:
+            pass
+        finally:
+            for s in (client, remote):
+                if s is not None:
+                    s.close()
+        return None
+
+    def open_tunnel(self, remote, host, port):
+        # Ask the upstream proxy for a tunnel. Return the bytes that came after its answer.
+        request = f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+        if self.upstream[2]:
+            request += f"Proxy-Authorization: Basic {self.upstream[2]}\r\n"
+        remote.sendall((request + "\r\n").encode("latin-1"))
+        head, rest = read_head(remote)
+        status = (head or "no answer").split("\r\n")[0]
+        if status.split(" ")[1:2] != ["200"]:
+            raise OSError(f"the upstream proxy answered: {status}")
+        return rest
+
+    def send_http(self, client, remote, method, target, url, headers, early, use_upstream):
+        # Plain http: send one request, then copy the answer. "Connection: close" stops the
+        # client from sending a second request, for another host, on the same connection.
+        keep, length = [], 0
+        for line in headers:
+            name, _, value = line.partition(":")
+            name, value = name.strip().lower(), value.strip()
+            if name == "transfer-encoding" or (name == "content-length" and not value.isdigit()):
+                return send_reply(client, 501, "Not Implemented", "this request body is not supported")
+            if name == "content-length":
+                length = int(value)
+            if name not in ("connection", "proxy-connection", "proxy-authorization", "keep-alive"):
+                keep.append(line)
+        if use_upstream and self.upstream[2]:
+            keep.append(f"Proxy-Authorization: Basic {self.upstream[2]}")
+        path = target if use_upstream else (url.path or "/") + (f"?{url.query}" if url.query else "")
+        head = "\r\n".join([f"{method} {path} HTTP/1.1"] + keep + ["Connection: close", "", ""])
+        body = early[:length]
+        remote.sendall(head.encode("latin-1") + body)
+        left = length - len(body)
+        while left > 0:
+            chunk = client.recv(min(65536, left))
+            if not chunk:
+                break
+            remote.sendall(chunk)
+            left -= len(chunk)
+        while True:
+            data = remote.recv(65536)
+            if not data:
+                break
+            client.sendall(data)
+        return None
+
+
+def serve_in_child(proxy, parent, flag_file):
+    # POSIX: exec replaces cjp with claude, so the proxy runs in its own process.
+    # It stops when claude (the parent) is gone.
+    try:
+        os.setsid()  # Ctrl+C in the terminal must not stop the proxy.
+        null = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(null, fd)
+        threading.Thread(target=proxy.serve, daemon=True).start()
+        while os.getppid() == parent:
+            time.sleep(1)
+    finally:
+        try:
+            flag_file.unlink()
+        except OSError:
+            pass
+        os._exit(0)
+
+
+def start_proxy(p, settings_path):
+    # Start the proxy. Return (env vars for claude, settings file for claude --settings).
+    cache = cache_dir()
+    log_path = cache / "proxy.log"
+    if log_path.exists() and log_path.stat().st_size > 1_000_000:
+        log_path.unlink()
+    for old in cache.glob("proxy-*.json"):  # Left behind when a console window was closed.
+        pid = old.stem.split("-")[1]
+        if not pid.isdigit() or not pid_alive(int(pid)):
+            old.unlink()
+    settings, _err = load_json(settings_path)
+    proxy = Proxy(allowed_hosts(p), find_upstream(p, settings or {}), log_path)
+    url = f"http://127.0.0.1:{proxy.port}"
+    upper = {"HTTPS_PROXY": url, "HTTP_PROXY": url, "NO_PROXY": LOOPBACK}
+    both = dict(upper, **{name.lower(): value for name, value in upper.items()})
+    # Node.js tools (npm, MCP servers) only use the proxy env when this is set.
+    env = dict(upper if IS_WIN else both, NODE_USE_ENV_PROXY="1")  # Windows env names ignore case.
+    # For claude, the env in the settings wins over the process env, and --settings wins
+    # over the user and project settings. So this file keeps claude on our proxy.
+    flag_file = cache / f"proxy-{os.getpid()}.json"
+    flag_file.write_text(json.dumps({"env": both}), encoding="utf-8")
+    if IS_WIN:
+        threading.Thread(target=proxy.serve, daemon=True).start()
+    else:
+        parent = os.getpid()
+        if os.fork() == 0:
+            serve_in_child(proxy, parent, flag_file)
+        proxy.sock.close()
+    return env, flag_file
+
+
+# ---------------------------------------------------------------------------
 # Run the real claude
 # ---------------------------------------------------------------------------
 
@@ -731,7 +1269,7 @@ def find_real_claude():
     return None
 
 
-def run_claude(real, argv):
+def run_claude(real, argv, env, flag_file=None):
     args = [real] + argv
     if IS_WIN:
         # Windows has no exec. Wait for claude and pass its exit code.
@@ -739,8 +1277,13 @@ def run_claude(real, argv):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         if hasattr(signal, "SIGBREAK"):
             signal.signal(signal.SIGBREAK, signal.SIG_IGN)
-        sys.exit(subprocess.call(args))
-    os.execv(real, args)
+        try:
+            code = subprocess.call(args, env=env)
+        finally:
+            if flag_file is not None:
+                flag_file.unlink(missing_ok=True)
+        sys.exit(code)
+    os.execve(real, args, env)
 
 
 def main():
@@ -750,12 +1293,11 @@ def main():
 
     if cmd == "xlsx-peek":
         return xlsx_peek(argv[1:])
-    if cmd == "--cjp-embed-policy":
-        if frozen():
-            sys.exit(f"[{APP}] the built exe can not change its policy.")
-        return embed_policy(argv[1:])
-
     try:
+        if cmd == "--cjp-embed-policy":
+            if frozen():
+                sys.exit(f"[{APP}] the built exe can not change its policy.")
+            return embed_policy(argv[1:])
         policy, source = load_policy()
         if cmd == "cjp-iam":
             print(json.dumps(iam_policy(policy, argv[1] if len(argv) > 1 else ""), indent=2))
@@ -763,8 +1305,13 @@ def main():
     except PolicyError as e:
         sys.exit(f"[{APP}] policy error:\n{e}")
     if cmd == "cjp-policy":
+        shown = copy.deepcopy(policy)
+        shown["proxy"]["upstream"] = mask_url(shown["proxy"]["upstream"])
         print(f"# source: {source}")
-        print(yaml.safe_dump(policy, sort_keys=False, allow_unicode=True))
+        print(yaml.safe_dump(shown, sort_keys=False, allow_unicode=True))
+        if policy["proxy"]["enabled"]:
+            print("# hosts that the proxy lets through:")
+            print("".join(f"#   {host}\n" for host in allowed_hosts(policy)))
         print("# settings written to ~/.claude/settings.json (also usable as managed-settings.json):")
         print(json.dumps(required_settings(policy), indent=2))
         return None
@@ -773,6 +1320,7 @@ def main():
 
     lock_process_env(policy)
     add_extra_bins_to_path()
+    safe("AWS profile check", ensure_aws_profile, policy)  # It can stop cjp on purpose.
     settings_path = config_dir() / "settings.json"
     setup = os.environ.get("CJP_SKIP_SETUP") != "1"
     uv = graphify = None
@@ -791,7 +1339,17 @@ def main():
     real = find_real_claude()
     if not real:
         sys.exit(f"[{APP}] the real claude was not found. Set CLAUDE_REAL_BIN.")
-    run_claude(real, argv)
+    env, flag_file = dict(os.environ), None
+    if policy["proxy"]["enabled"]:
+        try:
+            proxy_env, flag_file = start_proxy(policy, settings_path)
+        except OSError as e:
+            sys.exit(f"[{APP}] the proxy did not start, so claude was not started: {e}")
+        # ALL_PROXY could send other protocols around our proxy.
+        env = {k: v for k, v in env.items() if k.upper() != "ALL_PROXY"}
+        env.update(proxy_env)
+        argv = ["--settings", str(flag_file)] + argv
+    run_claude(real, argv, env, flag_file)
     return None
 
 

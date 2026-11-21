@@ -1,13 +1,28 @@
-# Build cjp.exe on a Windows runner. Download it from the run's artifacts.
+# Test cjp, then build cjp.exe on a Windows runner. Download it from the run's artifacts.
+#
+# This build uses policy.yaml only. Values of your own environment (.env) are not in
+# the repo, so build that exe on your own PC: .\build.ps1 -EnvFile .env
 name: build-windows
 
 on:
   push:
-    paths: ["cjp.py", "policy.yaml", "pyproject.toml", "build.ps1"]
   workflow_dispatch:
 
 jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Test
+        run: uv run python -m unittest discover -s tests -v
+
   build:
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,9 +30,14 @@ jobs:
       - name: Build
         shell: pwsh
         run: ./build.ps1
-      - name: Smoke test
+      - name: Show the policy in the exe
         shell: pwsh
         run: ./dist/cjp.exe cjp-policy
+      - name: Test the exe with a fake claude
+        shell: pwsh
+        run: uv run python -m unittest discover -s tests -k test_built_exe -v
+        env:
+          CJP_TEST_EXE: dist/cjp.exe
       - uses: actions/upload-artifact@v4
         with:
           name: cjp-windows
