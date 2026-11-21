@@ -697,8 +697,12 @@ def ensure_uv():
     if IS_WIN:
         cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
                f"irm {UV_WIN_INSTALL} | iex"]
-    else:
-        cmd = ["sh", "-c", f"curl -LsSf {UV_POSIX_INSTALL} | sh"]
+        # When cjp is started from PowerShell 7 (pwsh), PSModulePath points to the modules
+        # of PowerShell 7, and Windows PowerShell can not load its own modules. Without
+        # the variable, Windows PowerShell uses its default path.
+        env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
+        return install_tool("uv", lambda: run(cmd, env=env, timeout=600), cmd[-1])
+    cmd = ["sh", "-c", f"curl -LsSf {UV_POSIX_INSTALL} | sh"]
     return install_tool("uv", cmd, cmd[-1])
 
 
