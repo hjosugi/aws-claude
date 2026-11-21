@@ -78,7 +78,8 @@ How the proxy stays in front of claude (checked with Claude Code 2.1.330):
 | Built binary with a fake claude: embedded `.env` values, runtime `CJP_` vars ignored, proxy cleanup | Tested: Linux binary here, `cjp.exe` in GitHub Actions |
 | Real Claude Code 2.1.330 behind the cjp proxy (Linux, fake AWS keys) | Tested. The request reached Bedrock in Tokyo (AWS answered "invalid security token"). Nothing else was tried by claude. With a fake corporate proxy behind cjp, that proxy saw only `bedrock` and `bedrock-runtime` in `ap-northeast-1`. |
 | Real TLS through the proxy with curl | Tested. Allowed: Bedrock, STS, PyPI, GitHub. Blocked: `api.anthropic.com`, `claude.ai`, `sts.amazonaws.com`, Bedrock in `us-east-1`. |
-| uv install with PowerShell, rtk download on a corporate proxy, graphify on Windows | **Not tested. Test on a real Windows PC.** |
+| First start on a clean PC: uv, rtk, graphify install, rtk hook, graphify skill, CLAUDE.md rules, code graph | Tested: GitHub Actions on Windows (started from PowerShell 7) and Linux, with no corporate proxy. This test found a bug: from PowerShell 7, the uv install failed (`PSModulePath`). Fixed. |
+| The same installs behind a corporate proxy | **Not tested. Test on a real Windows PC.** |
 | Proxy behind a real corporate proxy, and the Windows proxy setting as the source of its address | **Not tested. Test on a real Windows PC.** |
 | Login with the IAM role, and real answers from the `jp.` profiles | **Not tested. Needs AWS access.** |
 
@@ -111,7 +112,7 @@ For production, build on Windows with your `.env`.
 ### Should do
 
 8. **Managed settings.** cjp writes user settings, which users can edit. For real enforcement, deploy the settings from `cjp cjp-policy` as managed settings (MDM or `managed-settings.json`). Managed-only keys worth adding there: `deniedModels: ["opus"]`, `availableModelsMatch: "exact"`.
-9. **Watch for Sonnet 5.5 `jp.`.** Check the Bedrock model card. When it appears, change `models.sonnet` in `policy.yaml` (or `CJP_MODEL_SONNET` in `.env`) and build again.
+9. **Watch for Sonnet 5.5 `jp.`.** Last check 2026-11-22: still no `jp.` profile (from Tokyo only Global). Check the Bedrock model card. When it appears, change `models.sonnet` in `policy.yaml` (or `CJP_MODEL_SONNET` in `.env`) and build again.
 10. **Update Claude Code by hand.** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` turns off update checks, and the cjp proxy blocks the download. Run the real `claude update` without cjp. `enforceAvailableModels` on Bedrock needs v2.1.287 or later.
 11. **Try Serena** if Claude still greps a lot after graphify (LSP symbol tools, good for Java). Note: Serena v2 is GPL-3.0.
 12. **Check `bashOutputMaxChars`.** Lowering it (for example to 10000) cuts tool output tokens. The minimum value is not documented, so test it first.
@@ -128,6 +129,7 @@ For production, build on Windows with your `.env`.
 - A one-file exe unpacks itself on each start. Antivirus can make it slow or flag it. Use `build.ps1 -OneDir` if needed.
 - Under Wine, the exe fails when stdout is not a pipe ("init_sys_streams"). This is a Wine issue, not a Windows one.
 - Background graph logs: `%LOCALAPPDATA%\cjp\graph-*.log`.
+- `ANTHROPIC_BEDROCK_BASE_URL` must be `https://` and an AWS host in Tokyo or Osaka (a normal or a VPC endpoint). Other values are removed.
 
 ## 6. Cost estimates (3 devs, 4 h/day, 20 days/month, `jp.` +10%)
 
