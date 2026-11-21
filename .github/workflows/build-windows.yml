@@ -1,0 +1,24 @@
+# Build cjp.exe on a Windows runner. Download it from the run's artifacts.
+name: build-windows
+
+on:
+  push:
+    paths: ["cjp.py", "policy.yaml", "pyproject.toml", "build.ps1"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Build
+        shell: pwsh
+        run: ./build.ps1
+      - name: Smoke test
+        shell: pwsh
+        run: ./dist/cjp.exe cjp-policy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cjp-windows
+          path: dist/cjp.exe

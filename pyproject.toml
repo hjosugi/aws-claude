@@ -1,0 +1,15 @@
+[project]
+name = "cjp"
+version = "0.1.0"
+description = "Start Claude Code with Amazon Bedrock, in Japan only"
+requires-python = ">=3.10"
+dependencies = [
+    "openpyxl>=3.1",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+build = ["pyinstaller>=6.0"]
+
+[tool.uv]
+package = false

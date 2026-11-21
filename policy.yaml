@@ -1,0 +1,37 @@
+# cjp policy.
+# Edit this file, then build again. The built exe embeds this file,
+# so people who only have the exe can not change it.
+#
+# Japan only: every model must be a jp. inference profile, or an
+# application inference profile ARN in ap-northeast-1 or ap-northeast-3.
+
+# Bedrock source region: ap-northeast-1 (Tokyo) or ap-northeast-3 (Osaka).
+region: ap-northeast-1
+
+# Allowed models. Keys are tiers: haiku, sonnet, opus.
+# Sonnet 5.5 has no jp. profile yet (Oct 2026), so sonnet uses Sonnet 4.6.
+models:
+  haiku: jp.anthropic.claude-haiku-5-5
+  sonnet: jp.anthropic.claude-sonnet-4-6
+  # opus: jp.anthropic.claude-opus-4-8
+
+# Model at start. Use one of the tier names above.
+default_model: haiku
+
+# Compact the chat before it reaches this many tokens (100000 to 1000000).
+# Haiku 5.5 costs 5x for prompts over 100K tokens, so keep 100000.
+auto_compact_window: 100000
+
+# Effort level: low, medium, high, or xhigh.
+effort_level: low
+
+# WebFetch sends requests to sites outside Japan. Keep false for Japan only.
+allow_web_fetch: false
+
+# true: deny the Grep tool and grep/rg in Bash, so Claude uses the code graph.
+block_grep: false
+
+# Helper tools that cjp installs and keeps on.
+tools:
+  rtk: true
+  graphify: true

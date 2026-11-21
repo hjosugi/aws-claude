@@ -1,0 +1,7 @@
+build/
+dist/
+*.spec
+.venv/
+.build-venv/
+__pycache__/
+cjp_policy_embedded.py
