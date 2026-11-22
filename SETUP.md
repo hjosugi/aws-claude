@@ -1,5 +1,7 @@
 # cjp setup
 
+日本語版: [SETUP.ja.md](SETUP.ja.md)
+
 Step-by-step setup, from an empty AWS account to a developer who runs `cjp`.
 
 | Part | Who | Where |

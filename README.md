@@ -10,7 +10,7 @@
 
 It locks the env, writes the policy into `~/.claude/settings.json`, sets up helper tools, starts the proxy, then runs the real `claude` with the same arguments.
 
-- Setup from an empty AWS account to a developer PC: `SETUP.md`
+- Setup from an empty AWS account to a developer PC: `SETUP.md` (日本語: `SETUP.ja.md`)
 - AWS resources (IAM role, budget with an automatic stop): `cloudformation/cjp.yml`
 - Decisions, status, and open tasks: `HANDOVER.md`
 
@@ -113,7 +113,7 @@ The tests need no AWS account and no real claude. The workflow runs them on Wind
 
 | File | What it is |
 |---|---|
-| `SETUP.md` | Setup steps: AWS account, build, developer PC, operations, troubleshooting |
+| `SETUP.md` / `SETUP.ja.md` | Setup steps (English / Japanese): AWS account, build, developer PC, operations, troubleshooting |
 | `cloudformation/cjp.yml` | IAM role, assume policy, and monthly budget with an automatic stop |
 | `cjp.py` | The launcher (one file) |
 | `policy.yaml` | Allowed models, AWS login, proxy hosts, and other rules |

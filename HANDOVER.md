@@ -92,7 +92,7 @@ For production, build on Windows with your `.env`.
 
 ### Must do
 
-Step-by-step commands for these tasks: `SETUP.md`.
+Step-by-step commands for these tasks: `SETUP.md` (Japanese: `SETUP.ja.md`). When you change one, change the other too.
 
 1. **Check the profiles in our account.**
    `aws bedrock list-inference-profiles --region ap-northeast-1 --query "inferenceProfileSummaries[?starts_with(inferenceProfileId, 'jp.')].inferenceProfileId"`
