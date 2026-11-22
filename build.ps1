@@ -1,9 +1,9 @@
-# Build cjp.exe with PyInstaller. Run this on Windows.
+# Build aws-claude.exe with PyInstaller. Run this on Windows.
 # PyInstaller can not build a Windows exe on Linux.
 #
 # Usage:
-#   powershell -ExecutionPolicy Bypass -File .\build.ps1                     # dist\cjp.exe (one file)
-#   powershell -ExecutionPolicy Bypass -File .\build.ps1 -OneDir             # dist\cjp\cjp.exe (faster start)
+#   powershell -ExecutionPolicy Bypass -File .\build.ps1                     # dist\aws-claude.exe (one file)
+#   powershell -ExecutionPolicy Bypass -File .\build.ps1 -OneDir             # dist\aws-claude\aws-claude.exe (faster start)
 #   powershell -ExecutionPolicy Bypass -File .\build.ps1 -EnvFile .env.prod  # build settings from another file (default: .env)
 param([switch]$OneDir, [string]$EnvFile)
 
@@ -11,10 +11,10 @@ $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 $mode = if ($OneDir) { "--onedir" } else { "--onefile" }
-$opts = @($mode, "--clean", "--noconfirm", "--console", "--name", "cjp",
-          "--hidden-import", "openpyxl", "--hidden-import", "cjp_policy_embedded", "cjp.py")
+$opts = @($mode, "--clean", "--noconfirm", "--console", "--name", "aws-claude",
+          "--hidden-import", "openpyxl", "--hidden-import", "aws_claude_policy_embedded", "aws_claude.py")
 # 1. Merge policy.yaml and .env, and embed the result. A bad policy stops the build.
-$embed = @("cjp.py", "--cjp-embed-policy", "policy.yaml")
+$embed = @("aws_claude.py", "--aws-claude-embed-policy", "policy.yaml")
 if ($EnvFile) { $embed += @("--env-file", $EnvFile) }
 
 if (Get-Command uv -ErrorAction SilentlyContinue) {
@@ -31,5 +31,5 @@ if (Get-Command uv -ErrorAction SilentlyContinue) {
 }
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
-$out = if ($OneDir) { "dist\cjp\cjp.exe" } else { "dist\cjp.exe" }
+$out = if ($OneDir) { "dist\aws-claude\aws-claude.exe" } else { "dist\aws-claude.exe" }
 Write-Host "Built: $PSScriptRoot\$out"

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""cjp - start Claude Code with Amazon Bedrock, in Japan only.
+"""aws-claude - start Claude Code with Amazon Bedrock, in Japan only.
 
 The policy comes from policy.yaml. Values in .env replace values in policy.yaml.
-  - Source mode (python cjp.py): reads policy.yaml and .env next to this file.
+  - Source mode (python aws_claude.py): reads policy.yaml and .env next to this file.
   - Built exe: uses the policy embedded at build time. Users can not change it.
 
 On every start:
@@ -15,16 +15,16 @@ On every start:
   6. Run the real claude with the same arguments, behind that proxy.
 
 Extra commands (claude has no commands with these names):
-  cjp xlsx-peek <file> [...]   small summary of an Excel file
-  cjp cjp-policy               show the policy and the settings it writes
-  cjp cjp-iam [account-id]     print an IAM policy that allows only these models
+  aws-claude xlsx-peek <file> [...]   small summary of an Excel file
+  aws-claude show-policy               show the policy and the settings it writes
+  aws-claude iam-policy [account-id]     print an IAM policy that allows only these models
 
 Env vars (they can not weaken the policy):
   CLAUDE_REAL_BIN       path to the real claude binary
-  CJP_SKIP_SETUP=1      skip tool installs and project files (the policy still applies)
-  CJP_NO_INSTALL=1      do not install missing tools
-  CJP_POLICY            source mode only: path to another policy.yaml
-  CJP_ENV_FILE          source mode and build only: path to another .env
+  AWS_CLAUDE_SKIP_SETUP=1      skip tool installs and project files (the policy still applies)
+  AWS_CLAUDE_NO_INSTALL=1      do not install missing tools
+  AWS_CLAUDE_POLICY            source mode only: path to another policy.yaml
+  AWS_CLAUDE_ENV_FILE          source mode and build only: path to another .env
 """
 import argparse
 import base64
@@ -50,34 +50,34 @@ from pathlib import Path
 
 import yaml
 
-APP = "cjp"
+APP = "aws-claude"
 IS_WIN = os.name == "nt"
 POLICY_FILE = "policy.yaml"
 ENV_FILE = ".env"
-EMBED_MODULE = "cjp_policy_embedded"
+EMBED_MODULE = "aws_claude_policy_embedded"
 
 # Keys for .env (see .env.example). Each key replaces one value of policy.yaml.
 # Two special cases: a model key with the value "none" removes that model, and
-# CJP_PROXY_ADD_HOSTS adds hosts to the list in policy.yaml.
+# AWS_CLAUDE_PROXY_ADD_HOSTS adds hosts to the list in policy.yaml.
 ENV_KEYS = {
-    "CJP_REGION": ("region", str),
-    "CJP_MODEL_HAIKU": ("models.haiku", str),
-    "CJP_MODEL_SONNET": ("models.sonnet", str),
-    "CJP_MODEL_OPUS": ("models.opus", str),
-    "CJP_DEFAULT_MODEL": ("default_model", str),
-    "CJP_AUTO_COMPACT_WINDOW": ("auto_compact_window", int),
-    "CJP_EFFORT_LEVEL": ("effort_level", str),
-    "CJP_ALLOW_WEB_FETCH": ("allow_web_fetch", bool),
-    "CJP_BLOCK_GREP": ("block_grep", bool),
-    "CJP_TOOL_RTK": ("tools.rtk", bool),
-    "CJP_TOOL_GRAPHIFY": ("tools.graphify", bool),
-    "CJP_AWS_PROFILE": ("aws.profile", str),
-    "CJP_AWS_ROLE_ARN": ("aws.role_arn", str),
-    "CJP_AWS_SOURCE_PROFILE": ("aws.source_profile", str),
-    "CJP_AWS_AUTH_REFRESH": ("aws.auth_refresh", str),
-    "CJP_PROXY": ("proxy.enabled", bool),
-    "CJP_PROXY_UPSTREAM": ("proxy.upstream", str),
-    "CJP_PROXY_ADD_HOSTS": ("proxy.allow_hosts", list),
+    "AWS_CLAUDE_REGION": ("region", str),
+    "AWS_CLAUDE_MODEL_HAIKU": ("models.haiku", str),
+    "AWS_CLAUDE_MODEL_SONNET": ("models.sonnet", str),
+    "AWS_CLAUDE_MODEL_OPUS": ("models.opus", str),
+    "AWS_CLAUDE_DEFAULT_MODEL": ("default_model", str),
+    "AWS_CLAUDE_AUTO_COMPACT_WINDOW": ("auto_compact_window", int),
+    "AWS_CLAUDE_EFFORT_LEVEL": ("effort_level", str),
+    "AWS_CLAUDE_ALLOW_WEB_FETCH": ("allow_web_fetch", bool),
+    "AWS_CLAUDE_BLOCK_GREP": ("block_grep", bool),
+    "AWS_CLAUDE_TOOL_RTK": ("tools.rtk", bool),
+    "AWS_CLAUDE_TOOL_GRAPHIFY": ("tools.graphify", bool),
+    "AWS_CLAUDE_PROFILE": ("aws.profile", str),
+    "AWS_CLAUDE_ROLE_ARN": ("aws.role_arn", str),
+    "AWS_CLAUDE_SOURCE_PROFILE": ("aws.source_profile", str),
+    "AWS_CLAUDE_AUTH_REFRESH": ("aws.auth_refresh", str),
+    "AWS_CLAUDE_PROXY": ("proxy.enabled", bool),
+    "AWS_CLAUDE_PROXY_UPSTREAM": ("proxy.upstream", str),
+    "AWS_CLAUDE_PROXY_ADD_HOSTS": ("proxy.allow_hosts", list),
 }
 BOOL_WORDS = {"1": True, "true": True, "yes": True, "on": True,
               "0": False, "false": False, "no": False, "off": False}
@@ -92,7 +92,7 @@ READ_DENY = [
 ]
 GREP_DENY = ["Grep", "Bash(grep *)", "Bash(rg *)", "Bash(egrep *)", "Bash(git grep *)"]
 
-# These env vars send requests to a place other than Bedrock in Japan. cjp removes them.
+# These env vars send requests to a place other than Bedrock in Japan. aws-claude removes them.
 FORBIDDEN_ENV = (
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE",
@@ -100,7 +100,7 @@ FORBIDDEN_ENV = (
     "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",  # claude.ai subscription login
 )
 # These env vars give AWS credentials without the profile. When the policy names a
-# profile, cjp removes them. A Bedrock API key would even skip the credential chain.
+# profile, aws-claude removes them. A Bedrock API key would even skip the credential chain.
 AWS_CRED_ENV = (
     "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
     "AWS_BEARER_TOKEN_BEDROCK", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE",
@@ -114,7 +114,7 @@ HOST_RE = r"(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)*"
 AWS_SERVICES = ("bedrock-runtime", "bedrock", "sts", "oidc", "portal.sso")
 PROXY_URL_ENV = ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY")  # Claude Code reads them in this order.
 LOOPBACK = "localhost,127.0.0.1,::1"
-# These env vars pick a model. cjp keeps them only when the value is an allowed model.
+# These env vars pick a model. aws-claude keeps them only when the value is an allowed model.
 MODEL_ENV = (
     "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -124,7 +124,7 @@ CLAUDE_MD_MARKER = "## Data files (Excel, CSV, logs)"
 CLAUDE_MD_SECTION = f"""
 {CLAUDE_MD_MARKER}
 - Do not read data files directly.
-- For Excel, start with: cjp xlsx-peek <file>  (options: --sheet NAME --rows N --find TEXT)
+- For Excel, start with: aws-claude xlsx-peek <file>  (options: --sheet NAME --rows N --find TEXT)
 - For other data, write a script in .claude/tools/ with PEP 723 metadata. Run it with uv run.
 - Reuse scripts that are already in .claude/tools/.
 - Print at most 50 lines. Print aggregates, not raw rows.
@@ -305,14 +305,14 @@ def parse_dotenv(text):
 
 
 def env_overrides(env_file):
-    # The CJP_ keys from the .env file, then from the process env (the process env wins).
+    # The AWS_CLAUDE_ keys from the .env file, then from the process env (the process env wins).
     # An empty value means "not set".
     values = {}
     if env_file.exists():
         for key, value in parse_dotenv(read_text(env_file)).items():
             if key in ENV_KEYS:
                 values[key] = value
-            elif key.startswith("CJP_"):
+            elif key.startswith("AWS_CLAUDE_"):
                 raise PolicyError(f"{env_file}: unknown key {key}. Known keys: {', '.join(ENV_KEYS)}")
     for key in ENV_KEYS:
         if key in os.environ:
@@ -473,13 +473,13 @@ def load_policy():
     # Built exe: only the embedded policy. Source mode: policy.yaml and .env next to this file.
     if frozen():
         try:
-            import cjp_policy_embedded as embedded
+            import aws_claude_policy_embedded as embedded
         except ImportError:
             raise PolicyError("this exe has no embedded policy. Build it with build.ps1.")
         return validate_policy(yaml.safe_load(embedded.POLICY_YAML)), "embedded in the exe"
     here = Path(__file__)
-    path = Path(os.environ.get("CJP_POLICY") or here.with_name(POLICY_FILE))
-    env_file = Path(os.environ.get("CJP_ENV_FILE") or here.with_name(ENV_FILE))
+    path = Path(os.environ.get("AWS_CLAUDE_POLICY") or here.with_name(POLICY_FILE))
+    env_file = Path(os.environ.get("AWS_CLAUDE_ENV_FILE") or here.with_name(ENV_FILE))
     policy, keys = read_policy(path, env_file)
     return policy, str(path) + (f", with {', '.join(keys)} from .env or the environment" if keys else "")
 
@@ -554,7 +554,7 @@ def clean_env(env, p):
 
 
 def lock_process_env(p):
-    # For the tools that cjp starts. For claude, the env in the settings wins over the
+    # For the tools that aws-claude starts. For claude, the env in the settings wins over the
     # process env, so ensure_settings() writes the same values there.
     for key, why in clean_env(os.environ, p).items():
         note(f"removed {key} from the environment: {why}")
@@ -563,7 +563,7 @@ def lock_process_env(p):
 
 def iam_policy(p, account):
     # An IAM policy that allows only the jp. profiles in the policy.
-    # cloudformation/cjp.yml has the same policy. A test checks that both stay the same.
+    # cloudformation/aws-claude.yml has the same policy. A test checks that both stay the same.
     if not account and p["aws"]["role_arn"]:
         account = p["aws"]["role_arn"].split(":")[4]  # The account of the role in the policy.
     if not re.fullmatch(r"\d{12}", account or ""):
@@ -591,7 +591,7 @@ def iam_policy(p, account):
 
 def embed_policy(args):
     # Build step: merge policy.yaml and .env, check the result, and write it into a
-    # module for PyInstaller. Usage: --cjp-embed-policy [policy.yaml] [--env-file FILE]
+    # module for PyInstaller. Usage: --aws-claude-embed-policy [policy.yaml] [--env-file FILE]
     here = Path(__file__)
     path, env_file = here.with_name(POLICY_FILE), None
     args = list(args)
@@ -606,12 +606,12 @@ def embed_policy(args):
             if not env_file.exists():
                 raise PolicyError(f"{env_file} was not found")
     if env_file is None:
-        env_file = Path(os.environ.get("CJP_ENV_FILE") or here.with_name(ENV_FILE))
+        env_file = Path(os.environ.get("AWS_CLAUDE_ENV_FILE") or here.with_name(ENV_FILE))
     policy, keys = read_policy(path, env_file)  # A bad policy stops the build.
     text = yaml.safe_dump(policy, sort_keys=False, allow_unicode=True)
     out = here.with_name(EMBED_MODULE + ".py")
     with open(out, "w", encoding="utf-8", newline="") as f:
-        f.write("# Generated by: python cjp.py --cjp-embed-policy. Do not edit.\n")
+        f.write("# Generated by: python aws_claude.py --aws-claude-embed-policy. Do not edit.\n")
         f.write(f"POLICY_YAML = {text!r}\n")
     print(f"embedded {path} into {out}" + (f" (values from .env: {', '.join(keys)})" if keys else ""))
 
@@ -637,7 +637,7 @@ def aws_profiles(path):
 
 
 def ensure_aws_profile(p):
-    # The policy can name the AWS profile. With a role ARN, cjp also creates that profile.
+    # The policy can name the AWS profile. With a role ARN, aws-claude also creates that profile.
     aws = p["aws"]
     name = aws["profile"]
     if not name:
@@ -676,7 +676,7 @@ def recently_failed(tool):
 def install_tool(name, installer, label):
     # Install a missing tool once. Do not retry for a day after a failure.
     # installer is a command list, or a function that returns (ok, output).
-    if os.environ.get("CJP_NO_INSTALL") == "1":
+    if os.environ.get("AWS_CLAUDE_NO_INSTALL") == "1":
         note(f"{name} is missing (install is off)")
         return None
     if recently_failed(name):
@@ -702,7 +702,7 @@ def ensure_uv():
     if IS_WIN:
         cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
                f"irm {UV_WIN_INSTALL} | iex"]
-        # When cjp is started from PowerShell 7 (pwsh), PSModulePath points to the modules
+        # When aws-claude is started from PowerShell 7 (pwsh), PSModulePath points to the modules
         # of PowerShell 7, and Windows PowerShell can not load its own modules. Without
         # the variable, Windows PowerShell uses its default path.
         env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
@@ -821,7 +821,7 @@ def ensure_settings(settings_path, p):
 
 
 def check_project_settings(p):
-    # Project settings override user settings. A shared file that breaks the policy stops cjp.
+    # Project settings override user settings. A shared file that breaks the policy stops aws-claude.
     root = git_root()
     if root is None:
         return
@@ -1221,7 +1221,7 @@ class Proxy:
 
 
 def serve_in_child(proxy, parent, flag_file):
-    # POSIX: exec replaces cjp with claude, so the proxy runs in its own process.
+    # POSIX: exec replaces aws-claude with claude, so the proxy runs in its own process.
     # It stops when claude (the parent) is gone.
     try:
         os.setsid()  # Ctrl+C in the terminal must not stop the proxy.
@@ -1314,17 +1314,17 @@ def main():
     if cmd == "xlsx-peek":
         return xlsx_peek(argv[1:])
     try:
-        if cmd == "--cjp-embed-policy":
+        if cmd == "--aws-claude-embed-policy":
             if frozen():
                 sys.exit(f"[{APP}] the built exe can not change its policy.")
             return embed_policy(argv[1:])
         policy, source = load_policy()
-        if cmd == "cjp-iam":
+        if cmd == "iam-policy":
             print(json.dumps(iam_policy(policy, argv[1] if len(argv) > 1 else ""), indent=2))
             return None
     except PolicyError as e:
         sys.exit(f"[{APP}] policy error:\n{e}")
-    if cmd == "cjp-policy":
+    if cmd == "show-policy":
         shown = copy.deepcopy(policy)
         shown["proxy"]["upstream"] = mask_url(shown["proxy"]["upstream"])
         print(f"# source: {source}")
@@ -1340,9 +1340,9 @@ def main():
 
     lock_process_env(policy)
     add_extra_bins_to_path()
-    safe("AWS profile check", ensure_aws_profile, policy)  # It can stop cjp on purpose.
+    safe("AWS profile check", ensure_aws_profile, policy)  # It can stop aws-claude on purpose.
     settings_path = config_dir() / "settings.json"
-    setup = os.environ.get("CJP_SKIP_SETUP") != "1"
+    setup = os.environ.get("AWS_CLAUDE_SKIP_SETUP") != "1"
     uv = graphify = None
     if setup:
         uv = safe("uv check", ensure_uv)
@@ -1351,7 +1351,7 @@ def main():
         if policy["tools"]["graphify"]:
             graphify = safe("graphify check", ensure_graphify, uv)
     safe("settings check", ensure_settings, settings_path, policy)
-    safe("project settings check", check_project_settings, policy)  # It can stop cjp on purpose.
+    safe("project settings check", check_project_settings, policy)  # It can stop aws-claude on purpose.
     if setup:
         safe("project check", ensure_project, graphify)
     add_extra_bins_to_path()  # New installs may have created ~/.local/bin.

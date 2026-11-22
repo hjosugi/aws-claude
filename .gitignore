@@ -4,7 +4,7 @@ dist/
 .venv/
 .build-venv/
 __pycache__/
-cjp_policy_embedded.py
+aws_claude_policy_embedded.py
 .env
 .env.*
 !.env.example

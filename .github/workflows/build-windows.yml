@@ -1,4 +1,4 @@
-# Test cjp, then build cjp.exe on a Windows runner. Download it from the run's artifacts.
+# Test aws-claude, then build aws-claude.exe on a Windows runner. Download it from the run's artifacts.
 #
 # This build uses policy.yaml only. Values of your own environment (.env) are not in
 # the repo, so build that exe on your own PC: .\build.ps1 -EnvFile .env
@@ -27,9 +27,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: Lint the CloudFormation template
-        run: uvx cfn-lint --regions ap-northeast-1 -- cloudformation/cjp.yml
+        run: uvx cfn-lint --regions ap-northeast-1 -- cloudformation/aws-claude.yml
 
-  # A first start on a clean PC: cjp installs uv, rtk, and graphify from the network,
+  # A first start on a clean PC: aws-claude installs uv, rtk, and graphify from the network,
   # adds the rtk hook and the graphify skill, and builds the code graph.
   # This job does not block the build, because it depends on other projects' servers.
   first-run:
@@ -45,7 +45,7 @@ jobs:
       - name: First run with real installs
         run: uv run python -m unittest discover -s tests -k test_first_run -v
         env:
-          CJP_TEST_FIRST_RUN: "1"
+          AWS_CLAUDE_TEST_FIRST_RUN: "1"
 
   build:
     needs: test
@@ -58,13 +58,13 @@ jobs:
         run: ./build.ps1
       - name: Show the policy in the exe
         shell: pwsh
-        run: ./dist/cjp.exe cjp-policy
+        run: ./dist/aws-claude.exe show-policy
       - name: Test the exe with a fake claude
         shell: pwsh
         run: uv run python -m unittest discover -s tests -k test_built_exe -v
         env:
-          CJP_TEST_EXE: dist/cjp.exe
+          AWS_CLAUDE_TEST_EXE: dist/aws-claude.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: cjp-windows
-          path: dist/cjp.exe
+          name: aws-claude-windows
+          path: dist/aws-claude.exe

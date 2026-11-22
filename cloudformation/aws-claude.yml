@@ -1,17 +1,17 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  cjp - AWS resources for Claude Code on Amazon Bedrock, in Japan only. An IAM role that can
+  aws-claude - AWS resources for Claude Code on Amazon Bedrock, in Japan only. An IAM role that can
   call only the jp. inference profiles, a policy that lets developers assume that role, and a
   monthly budget that sends an email at the alert amount and blocks Bedrock at the stop amount.
 
 # Deploy in ap-northeast-1. CloudFormation has no Budgets resources in ap-northeast-3.
 # See SETUP.md:
-#   aws cloudformation deploy --region ap-northeast-1 --stack-name cjp \
-#     --template-file cloudformation/cjp.yml --capabilities CAPABILITY_NAMED_IAM \
+#   aws cloudformation deploy --region ap-northeast-1 --stack-name aws-claude \
+#     --template-file cloudformation/aws-claude.yml --capabilities CAPABILITY_NAMED_IAM \
 #     --parameter-overrides AlertEmail=you@example.co.jp
 #
 # Use a dedicated AWS account. The budget counts the cost of the whole account.
-# The role policy here and the output of "cjp cjp-iam" are the same. A test checks this.
+# The role policy here and the output of "aws-claude iam-policy" are the same. A test checks this.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -28,7 +28,7 @@ Parameters:
     Type: String
     Default: claude-code
     AllowedPattern: "[A-Za-z0-9+=,.@_-]{1,50}"
-    Description: Name of the IAM role. Put its ARN into .env as CJP_AWS_ROLE_ARN.
+    Description: Name of the IAM role. Put its ARN into .env as AWS_CLAUDE_ROLE_ARN.
   TrustedPrincipalArns:
     Type: CommaDelimitedList
     Default: ""
@@ -48,17 +48,17 @@ Parameters:
     Type: String
     Default: ap-northeast-1
     AllowedValues: [ap-northeast-1, ap-northeast-3]
-    Description: Bedrock source region. The same value as "region" in policy.yaml (CJP_REGION).
+    Description: Bedrock source region. The same value as "region" in policy.yaml (AWS_CLAUDE_REGION).
   HaikuProfileId:
     Type: String
     Default: jp.anthropic.claude-haiku-5-5
     AllowedPattern: "jp\\.anthropic\\.[a-z0-9.:-]+"
-    Description: The same value as models.haiku in policy.yaml (CJP_MODEL_HAIKU).
+    Description: The same value as models.haiku in policy.yaml (AWS_CLAUDE_MODEL_HAIKU).
   SonnetProfileId:
     Type: String
     Default: jp.anthropic.claude-sonnet-4-6
     AllowedPattern: "(jp\\.anthropic\\.[a-z0-9.:-]+)?"
-    Description: The same value as models.sonnet in policy.yaml (CJP_MODEL_SONNET). Empty for Haiku only.
+    Description: The same value as models.sonnet in policy.yaml (AWS_CLAUDE_MODEL_SONNET). Empty for Haiku only.
   EnableBudget:
     Type: String
     Default: "true"
@@ -99,7 +99,7 @@ Resources:
   BedrockJapanPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
-      Description: Call only the jp. inference profiles of cjp. No Bedrock outside Japan.
+      Description: Call only the jp. inference profiles of aws-claude. No Bedrock outside Japan.
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -170,7 +170,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Ref RoleName
-      Description: Claude Code through cjp. Bedrock in Japan only.
+      Description: Claude Code through aws-claude. Bedrock in Japan only.
       MaxSessionDuration: !Ref MaxSessionDuration
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -306,11 +306,11 @@ Resources:
 
 Outputs:
   RoleArn:
-    Description: Put this into .env as CJP_AWS_ROLE_ARN.
+    Description: Put this into .env as AWS_CLAUDE_ROLE_ARN.
     Value: !GetAtt ClaudeCodeRole.Arn
   EnvLine:
     Description: The line for .env.
-    Value: !Sub CJP_AWS_ROLE_ARN=${ClaudeCodeRole.Arn}
+    Value: !Sub AWS_CLAUDE_ROLE_ARN=${ClaudeCodeRole.Arn}
   AssumePolicyName:
     Description: Attach this policy to the developers (IAM group, or IAM Identity Center permission set).
     Value: !Sub ${RoleName}-assume

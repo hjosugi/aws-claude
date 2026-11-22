@@ -1,7 +1,7 @@
 #!/bin/sh
-# Build the cjp binary with PyInstaller (Linux or macOS).
-# Usage: ./build.sh                       # dist/cjp (one file)
-#        ./build.sh --onedir              # dist/cjp/cjp (faster start)
+# Build the aws-claude binary with PyInstaller (Linux or macOS).
+# Usage: ./build.sh                       # dist/aws-claude (one file)
+#        ./build.sh --onedir              # dist/aws-claude/aws-claude (faster start)
 #        ./build.sh --env-file .env.prod  # build settings from another file (default: .env)
 set -eu
 cd "$(dirname "$0")"
@@ -16,15 +16,15 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-set -- "$mode" --clean --noconfirm --console --name cjp \
-    --hidden-import openpyxl --hidden-import cjp_policy_embedded cjp.py
+set -- "$mode" --clean --noconfirm --console --name aws-claude \
+    --hidden-import openpyxl --hidden-import aws_claude_policy_embedded aws_claude.py
 
 # Merge policy.yaml and .env, and embed the result. A bad policy stops the build.
 embed() {
     if [ -n "$env_file" ]; then
-        "$@" cjp.py --cjp-embed-policy policy.yaml --env-file "$env_file"
+        "$@" aws_claude.py --aws-claude-embed-policy policy.yaml --env-file "$env_file"
     else
-        "$@" cjp.py --cjp-embed-policy policy.yaml
+        "$@" aws_claude.py --aws-claude-embed-policy policy.yaml
     fi
 }
 
@@ -37,4 +37,4 @@ else
     embed .build-venv/bin/python
     .build-venv/bin/pyinstaller "$@"
 fi
-echo "Built: $(pwd)/dist/cjp"
+echo "Built: $(pwd)/dist/aws-claude"

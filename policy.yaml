@@ -1,4 +1,4 @@
-# cjp policy.
+# aws-claude policy.
 # Edit this file, then build again. The built exe embeds this file,
 # so people who only have the exe can not change it.
 #
@@ -31,19 +31,19 @@ allow_web_fetch: false
 # true: deny the Grep tool and grep/rg in Bash, so Claude uses the code graph.
 block_grep: false
 
-# Helper tools that cjp installs and keeps on.
+# Helper tools that aws-claude installs and keeps on.
 tools:
   rtk: true
   graphify: true
 
 # AWS login. With empty values, claude uses the default AWS credential chain.
-# cjp never uses a claude.ai login or an Anthropic API key.
+# aws-claude never uses a claude.ai login or an Anthropic API key.
 aws:
-  # Profile in ~/.aws/config. cjp sets AWS_PROFILE to it and removes AWS key env vars,
+  # Profile in ~/.aws/config. aws-claude sets AWS_PROFILE to it and removes AWS key env vars,
   # so claude can only use this profile.
   profile: ""
-  # IAM role for Claude Code. cjp adds a profile for this role to ~/.aws/config
-  # when it is missing. The profile name is the value above, or "cjp".
+  # IAM role for Claude Code. aws-claude adds a profile for this role to ~/.aws/config
+  # when it is missing. The profile name is the value above, or "aws-claude".
   role_arn: ""
   # Profile that logs in before the role is assumed. Default: "default".
   source_profile: ""
@@ -52,17 +52,17 @@ aws:
   auth_refresh: ""
 
 # Local proxy. claude and the tools it starts can only reach the allowed hosts.
-# The AWS endpoints in the Japan regions are always allowed (see: cjp cjp-policy).
+# The AWS endpoints in the Japan regions are always allowed (see: aws-claude show-policy).
 proxy:
   enabled: true
   # Corporate proxy to go through, as http://host:port.
-  # Empty: cjp uses HTTPS_PROXY, or the proxy from the OS settings.
+  # Empty: aws-claude uses HTTPS_PROXY, or the proxy from the OS settings.
   upstream: ""
   # More hosts to allow. "*.example.co.jp" allows every host below example.co.jp.
   # This list is enough for normal development work. Each host is also a way out
   # for data, so remove the groups that you do not need. For AWS only: allow_hosts: []
   # Hosts for one environment (for example an internal repository) go into .env:
-  # CJP_PROXY_ADD_HOSTS adds them to this list.
+  # AWS_CLAUDE_PROXY_ADD_HOSTS adds them to this list.
   allow_hosts:
     # GitHub: git over https, gh, and release downloads (uv installs Python from there).
     - github.com

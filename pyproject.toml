@@ -1,5 +1,5 @@
 [project]
-name = "cjp"
+name = "aws-claude"
 version = "0.1.0"
 description = "Start Claude Code with Amazon Bedrock, in Japan only"
 requires-python = ">=3.10"
